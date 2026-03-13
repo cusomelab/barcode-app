@@ -254,7 +254,35 @@ with tab2:
     st.divider()
     st.subheader('✍️ 고정 문구')
     l_caution = st.text_area('취급주의', value='취급 상 주의 사항 : 화기에 주의 하세요. 의류의 경우 단독 세탁 권장, 표백제 사용 금지, 다림질 주의, 착용시 손톱이나 날카로운 곳에 긁히지 않도록 주의', height=80, key='l_caution')
-    l_addr    = st.text_input('주소/전화', value='표시자 주소 및 전화번호 : (주) 폰이지 서울시 영등포구 영등포로 109, 749호 0507-1311-1108', key='l_addr')
+
+    # ★ 주소/전화 - 강조 표시 + 저장 후 회색 처리
+    addr_saved = st.session_state.get('l_addr_saved', False)
+    if not addr_saved:
+        st.markdown("""
+        <div style='background:#fff3cd;border:2px solid #ffc107;border-radius:8px;padding:10px 14px;margin-bottom:6px'>
+            ⚠️ <b>이 부분은 꼭 수정해주세요!</b><br>
+            <small style='color:#856404'>본인의 주소와 전화번호로 변경 후 저장 버튼을 클릭하세요</small>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style='background:#f0f0f0;border:1px solid #ccc;border-radius:8px;padding:6px 14px;margin-bottom:6px'>
+            ✅ <small style='color:#888'>주소/전화번호 저장 완료</small>
+        </div>
+        """, unsafe_allow_html=True)
+
+    col_addr, col_save = st.columns([4, 1])
+    with col_addr:
+        l_addr = st.text_input('주소/전화',
+            value=st.session_state.get('l_addr_val', '표시자 주소 및 전화번호 : (주) 폰이지 서울시 영등포구 영등포로 109, 749호 0507-1311-1108'),
+            key='l_addr',
+            label_visibility='collapsed' if addr_saved else 'visible')
+    with col_save:
+        if st.button('💾 저장', key='l_addr_save_btn'):
+            st.session_state['l_addr_val'] = l_addr
+            st.session_state['l_addr_saved'] = True
+            st.rerun()
+
     l_origin  = st.text_input('제조국',   value='제조국 : Made in China',  key='l_origin')
     l_age     = st.text_input('사용연령', value='사용연령 : 만14세이상',    key='l_age')
 
