@@ -1,7 +1,8 @@
 # ╔══════════════════════════════════════════════════════╗
 # ║         [쿠썸] 바코드 라벨 생성기 - Streamlit         ║
 # ╚══════════════════════════════════════════════════════╝
-import os, io, urllib.request
+import os, io, urllib.request, csv, zipfile
+from datetime import datetime, timedelta
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 import barcode
@@ -9,16 +10,40 @@ from barcode.writer import ImageWriter
 from openpyxl import load_workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.utils import get_column_letter
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                 TableStyle, HRFlowable, PageBreak)
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from pypdf import PdfWriter, PdfReader
 
 # ── 폰트 준비 ──────────────────────────────────────────
 FONT_PATH = 'NanumGothicBold.ttf'
+FONT_REG_PATH = 'NanumGothic.ttf'
 if not os.path.exists(FONT_PATH):
     urllib.request.urlretrieve(
         'https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Bold.ttf',
         FONT_PATH
     )
+if not os.path.exists(FONT_REG_PATH):
+    urllib.request.urlretrieve(
+        'https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf',
+        FONT_REG_PATH
+    )
 
-# ── 공통 헬퍼 ──────────────────────────────────────────
+# reportlab 한국어 폰트 등록
+try:
+    pdfmetrics.registerFont(TTFont('NanumBold', FONT_PATH))
+    pdfmetrics.registerFont(TTFont('NanumReg', FONT_REG_PATH))
+except Exception:
+    pass
+
+# ══════════════════════════════════════════════════════
+# ── 공통 헬퍼 (바코드 라벨용) ──────────────────────────
+# ══════════════════════════════════════════════════════
 def wrap_text(text, font, max_w, draw):
     lines, cur = [], []
     for word in text.split(' '):
@@ -59,8 +84,7 @@ def get_barcode_img(barcode_number, write_text=False):
         return raw.crop((l,t,rr,b))
 
 # ── 소형 라벨 생성 ─────────────────────────────────────
-def create_small(product_name, barcode_number, material,
-                 fixed_origin, fixed_age):
+def create_small(product_name, barcode_number, material, fixed_origin, fixed_age):
     CANVAS_W, CANVAS_H = 650, 450; PAD = 30
     img=Image.new('RGB',(CANVAS_W,CANVAS_H),'white'); draw=ImageDraw.Draw(img)
     font_big=ImageFont.truetype(FONT_PATH,26)
@@ -190,6 +214,271 @@ def process_excel(uploaded_file, mode, settings):
     progress.progress(1.0); status.text(f'🎉 완료! {ok}개 생성')
     return output, ok, errors
 
+
+# ══════════════════════════════════════════════════════
+# ── 출고 작업 지시서 PDF 생성 함수들 ──────────────────
+# ══════════════════════════════════════════════════════
+
+def parse_date(date_str):
+    """날짜 문자열을 파싱해서 datetime 반환. 실패하면 None."""
+    if not date_str or not date_str.strip():
+        return None
+    s = date_str.strip()
+    nums = [n for n in __import__('re').findall(r'\d+', s)]
+    try:
+        if len(nums) == 1 and len(nums[0]) == 8:
+            ymd = nums[0]
+            return datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:8]))
+        elif len(nums) >= 3:
+            y, m, d = int(nums[0]), int(nums[1]), int(nums[2])
+            if y < 100: y += 2000
+            return datetime(y, m, d)
+    except Exception:
+        pass
+    return None
+
+
+def calc_deadline(date_str):
+    """입고예정일 + 20일 → 입고마감일 문자열 반환"""
+    dt = parse_date(date_str)
+    if dt is None:
+        return '날짜 없음'
+    deadline = dt + timedelta(days=20)
+    return deadline.strftime('%Y-%m-%d')
+
+
+def parse_csv_to_items(file_bytes):
+    """CSV 바이트 → WorkOrderItem 리스트 반환"""
+    text = file_bytes.decode('utf-8-sig', errors='replace')
+    reader = csv.reader(text.splitlines())
+    rows = list(reader)
+    if not rows:
+        return []
+
+    # 헤더 행 건너뛰기 (첫 행)
+    data_rows = rows[1:]
+    items = []
+    for row in data_rows:
+        if len(row) < 11 or not (row[1] if len(row) > 1 else '').strip():
+            continue
+        def safe(idx, default=''):
+            return row[idx].strip() if idx < len(row) else default
+        try:
+            qty = int(safe(7, '0') or '0')
+        except ValueError:
+            qty = 0
+        items.append({
+            'logisticsCenter': safe(1),
+            'expectedDate':    safe(3),
+            'productBarcode':  safe(5),
+            'productName':     safe(6),
+            'quantity':        qty,
+            'shipmentNumber':  safe(8),
+            'orderDate':       safe(9),
+            'boxNumber':       safe(10),
+            'location':        safe(12),
+        })
+    return items
+
+
+def group_items(items, grouping_keys):
+    """그룹화 기준에 따라 dict로 묶음"""
+    grouped = {}
+    for item in items:
+        key_parts = [item.get(k, '') for k in grouping_keys if item.get(k)]
+        key = '_'.join(key_parts) if key_parts else '(미분류)'
+        grouped.setdefault(key, []).append(item)
+
+    # 각 그룹 내부 정렬: 박스번호 → 상품명
+    import locale
+    for key in grouped:
+        grouped[key].sort(key=lambda x: (
+            [int(c) if c.isdigit() else c.lower()
+             for c in __import__('re').split(r'(\d+)', x.get('boxNumber',''))],
+            x.get('productName','')
+        ))
+    return grouped
+
+
+def create_work_order_pdf(group_key, items):
+    """reportlab으로 출고 작업 지시서 PDF 생성 → BytesIO 반환"""
+    buf = io.BytesIO()
+    PAGE_W, PAGE_H = A4
+    MARGIN = 18 * mm
+
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN, bottomMargin=MARGIN
+    )
+
+    # 스타일 정의
+    s_title   = ParagraphStyle('title',   fontName='NanumBold', fontSize=18, leading=22, textColor=colors.HexColor('#111111'))
+    s_sub     = ParagraphStyle('sub',     fontName='NanumBold', fontSize=9,  leading=12, textColor=colors.HexColor('#888888'), spaceAfter=2)
+    s_card_lbl= ParagraphStyle('cardlbl', fontName='NanumBold', fontSize=8,  leading=10, textColor=colors.HexColor('#888888'))
+    s_card_val= ParagraphStyle('cardval', fontName='NanumBold', fontSize=12, leading=15, textColor=colors.HexColor('#111111'))
+    s_card_big= ParagraphStyle('cardbig', fontName='NanumBold', fontSize=22, leading=26, textColor=colors.HexColor('#1a56db'))
+    s_th      = ParagraphStyle('th',      fontName='NanumBold', fontSize=9,  leading=11, textColor=colors.white)
+    s_td      = ParagraphStyle('td',      fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
+    s_td_bold = ParagraphStyle('tdbold',  fontName='NanumBold', fontSize=10, leading=12, textColor=colors.HexColor('#1a56db'))
+    s_mono    = ParagraphStyle('mono',    fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
+    s_footer  = ParagraphStyle('footer',  fontName='NanumReg',  fontSize=8,  leading=10, textColor=colors.HexColor('#888888'))
+
+    total_qty   = sum(i['quantity'] for i in items)
+    first       = items[0]
+    deadline    = calc_deadline(first.get('expectedDate',''))
+    created_at  = datetime.now().strftime('%Y-%m-%d %H:%M')
+    usable_w    = PAGE_W - MARGIN * 2
+
+    story = []
+
+    # ── 헤더 ──────────────────────────────────────────
+    story.append(Paragraph('출고 작업 지시서', s_title))
+    story.append(Paragraph(group_key, s_sub))
+    story.append(Spacer(1, 1*mm))
+    story.append(HRFlowable(width='100%', thickness=2, color=colors.HexColor('#1a56db')))
+    story.append(Spacer(1, 4*mm))
+
+    # ── 정보 카드 (3열 테이블) ─────────────────────────
+    col_w = usable_w / 3
+
+    def info_card(label, value, big=False):
+        lbl = Paragraph(label, s_card_lbl)
+        val = Paragraph(str(value), s_card_big if big else s_card_val)
+        return [lbl, val]
+
+    card_data = [[
+        info_card('물류센터',  first.get('logisticsCenter','-')),
+        info_card('입고예정일', first.get('expectedDate','-')),
+        info_card('총 수량',   total_qty, big=True),
+    ],[
+        info_card('송장번호',  first.get('shipmentNumber','-')),
+        info_card('입고마감일', deadline),
+        info_card('품목 수',   f'{len(items)}개'),
+    ]]
+
+    def make_card_cell(label_val_list):
+        """[lbl_para, val_para] → 테이블 셀용 nested table"""
+        t = Table([[label_val_list[0]], [label_val_list[1]]], colWidths=[col_w - 6*mm])
+        t.setStyle(TableStyle([
+            ('LEFTPADDING',  (0,0),(-1,-1), 0),
+            ('RIGHTPADDING', (0,0),(-1,-1), 0),
+            ('TOPPADDING',   (0,0),(-1,-1), 1),
+            ('BOTTOMPADDING',(0,0),(-1,-1), 1),
+        ]))
+        return t
+
+    card_table_data = []
+    for row in card_data:
+        card_table_data.append([make_card_cell(cell) for cell in row])
+
+    card_bg = [colors.HexColor('#f8fafc'), colors.HexColor('#eff6ff')]
+    card_tbl = Table(card_table_data, colWidths=[col_w]*3)
+    card_style = [
+        ('BACKGROUND', (0,0),(2,0), card_bg[0]),
+        ('BACKGROUND', (0,1),(2,1), card_bg[1]),
+        ('BOX',        (0,0),(2,1), 1, colors.HexColor('#e2e8f0')),
+        ('INNERGRID',  (0,0),(2,1), 0.5, colors.HexColor('#e2e8f0')),
+        ('LEFTPADDING',  (0,0),(-1,-1), 4*mm),
+        ('RIGHTPADDING', (0,0),(-1,-1), 2*mm),
+        ('TOPPADDING',   (0,0),(-1,-1), 3*mm),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 3*mm),
+        ('VALIGN',     (0,0),(-1,-1), 'MIDDLE'),
+        ('ROUNDEDCORNERS', [4]),
+    ]
+    card_tbl.setStyle(TableStyle(card_style))
+    story.append(card_tbl)
+    story.append(Spacer(1, 5*mm))
+
+    # ── 상품 테이블 ────────────────────────────────────
+    # 컬럼 폭: 바코드 27%, 상품명 35%, 수량 8%, 위치 14%, 박스 16%
+    cw = [usable_w*p for p in [0.25, 0.35, 0.08, 0.16, 0.16]]
+
+    header_row = [
+        Paragraph('바코드', s_th),
+        Paragraph('상품명', s_th),
+        Paragraph('수량', s_th),
+        Paragraph('위치', s_th),
+        Paragraph('박스', s_th),
+    ]
+    table_data = [header_row]
+
+    for i, item in enumerate(items):
+        row = [
+            Paragraph(item.get('productBarcode',''), s_mono),
+            Paragraph(item.get('productName',''),    s_td),
+            Paragraph(str(item.get('quantity',0)),   s_td_bold),
+            Paragraph(item.get('location',''),       s_td),
+            Paragraph(item.get('boxNumber',''),      s_td),
+        ]
+        table_data.append(row)
+
+    # 합계 행
+    table_data.append([
+        Paragraph('합  계', ParagraphStyle('sum', fontName='NanumBold', fontSize=9, textColor=colors.HexColor('#111111'))),
+        Paragraph('', s_td),
+        Paragraph(str(total_qty), ParagraphStyle('sumqty', fontName='NanumBold', fontSize=12, textColor=colors.HexColor('#1a56db'))),
+        Paragraph('', s_td),
+        Paragraph('', s_td),
+    ])
+
+    tbl = Table(table_data, colWidths=cw, repeatRows=1)
+
+    row_colors = []
+    for i in range(1, len(table_data)-1):
+        bg = colors.white if i % 2 == 1 else colors.HexColor('#f8fafc')
+        row_colors.append(('BACKGROUND', (0,i),(4,i), bg))
+
+    tbl_style = [
+        # 헤더
+        ('BACKGROUND', (0,0),(4,0), colors.HexColor('#1e293b')),
+        ('TEXTCOLOR',  (0,0),(4,0), colors.white),
+        ('ALIGN',      (0,0),(4,0), 'CENTER'),
+        # 합계 행
+        ('BACKGROUND', (0,-1),(4,-1), colors.HexColor('#eff6ff')),
+        ('LINEABOVE',  (0,-1),(4,-1), 1, colors.HexColor('#93c5fd')),
+        # 전체
+        ('FONTSIZE',   (0,0),(-1,-1), 9),
+        ('TOPPADDING', (0,0),(-1,-1), 4),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+        ('LEFTPADDING',(0,0),(-1,-1), 3*mm),
+        ('RIGHTPADDING',(0,0),(-1,-1), 2*mm),
+        ('VALIGN',     (0,0),(-1,-1), 'MIDDLE'),
+        ('ALIGN',      (2,1),(2,-1), 'CENTER'),  # 수량 가운데
+        ('GRID',       (0,0),(-1,-1), 0.4, colors.HexColor('#e2e8f0')),
+        ('LINEBELOW',  (0,0),(4,0), 1, colors.HexColor('#1a56db')),
+    ] + row_colors
+
+    tbl.setStyle(TableStyle(tbl_style))
+    story.append(tbl)
+    story.append(Spacer(1, 5*mm))
+
+    # ── 푸터 ──────────────────────────────────────────
+    story.append(HRFlowable(width='100%', thickness=0.5, color=colors.HexColor('#e2e8f0')))
+    story.append(Spacer(1, 2*mm))
+    story.append(Paragraph(
+        f'※ 바코드와 수량을 작업 전 반드시 대조해 주세요. (자동 생성 문서) · 생성일시: {created_at}',
+        s_footer
+    ))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf
+
+
+def merge_pdfs(pdf_buffers):
+    """여러 PDF BytesIO를 하나로 병합 → BytesIO 반환"""
+    writer = PdfWriter()
+    for buf in pdf_buffers:
+        reader = PdfReader(buf)
+        for page in reader.pages:
+            writer.add_page(page)
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out
+
+
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
@@ -197,7 +486,7 @@ st.set_page_config(page_title='바코드 라벨 생성기', page_icon='🏷️',
 st.title('🏷️ 바코드 라벨 생성기')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)'])
+tab1, tab2, tab3 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -279,3 +568,138 @@ with tab2:
             fname = l_file.name.replace('.xlsx','_완성.xlsx')
             st.download_button('⬇️ 완성 파일 다운로드', output, file_name=fname,
                              mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+# ── 출고 작업 지시서 탭 ───────────────────────────────
+with tab3:
+    st.subheader('📄 출고 작업 지시서 PDF 생성')
+    st.caption('CSV 파일을 업로드하면 그룹별 지시서를 PDF로 생성하고 하나로 병합합니다')
+
+    # CSV 컬럼 안내
+    with st.expander('📌 CSV 컬럼 형식 안내', expanded=False):
+        st.markdown("""
+| 열 번호 | 내용 |
+|--------|------|
+| B (2번째) | 물류센터 |
+| D (4번째) | 입고예정일 |
+| F (6번째) | 바코드 |
+| G (7번째) | 상품명 |
+| H (8번째) | 수량 |
+| I (9번째) | 송장번호 |
+| J (10번째) | 발주일 |
+| K (11번째) | 박스번호 |
+| M (13번째) | 위치 |
+        """)
+        st.info('첫 번째 행은 헤더로 자동 스킵됩니다.')
+
+    st.divider()
+
+    # 그룹화 기준
+    st.subheader('🗂️ 그룹화 기준 선택')
+    grouping_options = {
+        '물류센터': 'logisticsCenter',
+        '송장번호': 'shipmentNumber',
+        '박스번호': 'boxNumber',
+    }
+    selected_labels = st.multiselect(
+        '그룹화 기준 (복수 선택 가능)',
+        options=list(grouping_options.keys()),
+        default=['물류센터', '송장번호'],
+        key='p_grouping'
+    )
+    selected_keys = [grouping_options[lbl] for lbl in selected_labels]
+
+    st.divider()
+
+    # 다운로드 옵션
+    st.subheader('⬇️ 출력 옵션')
+    download_mode = st.radio(
+        '다운로드 형태',
+        ['📄 전체 병합 PDF (1개 파일)', '🗜️ 그룹별 ZIP (개별 PDF)'],
+        key='p_dl_mode'
+    )
+
+    st.divider()
+
+    p_file = st.file_uploader('📂 CSV 파일 업로드', type=['csv'], key='p_file')
+
+    if p_file:
+        # 파일 분석 미리보기
+        raw = p_file.read()
+        items = parse_csv_to_items(raw)
+        p_file.seek(0)
+
+        if not items:
+            st.error('⚠️ CSV에서 데이터를 읽지 못했습니다. 컬럼 형식을 확인해주세요.')
+        else:
+            if selected_keys:
+                grouped = group_items(items, selected_keys)
+
+                # 그룹 미리보기 테이블
+                st.markdown(f'**총 {len(grouped)}개 그룹** · {len(items)}개 품목')
+                preview_rows = []
+                for gk, gitems in grouped.items():
+                    preview_rows.append({
+                        '그룹 키': gk,
+                        '품목 수': len(gitems),
+                        '총 수량': sum(i['quantity'] for i in gitems),
+                        '입고예정일': gitems[0].get('expectedDate','-'),
+                        '입고마감일': calc_deadline(gitems[0].get('expectedDate','')),
+                    })
+                st.dataframe(preview_rows, use_container_width=True, hide_index=True)
+
+                st.divider()
+
+                if st.button('🚀 PDF 생성 시작', type='primary', key='p_btn'):
+                    group_keys = list(grouped.keys())
+                    total_g = len(group_keys)
+                    progress = st.progress(0)
+                    status   = st.empty()
+
+                    pdf_buffers = {}
+                    errors = []
+
+                    for i, gk in enumerate(group_keys):
+                        try:
+                            status.text(f'📝 생성 중: {gk}  ({i+1}/{total_g})')
+                            pdf_buf = create_work_order_pdf(gk, grouped[gk])
+                            pdf_buffers[gk] = pdf_buf
+                        except Exception as e:
+                            errors.append(f'[{gk}] 실패: {e}')
+                        progress.progress((i+1) / total_g)
+
+                    if errors:
+                        for e in errors:
+                            st.error(e)
+
+                    if pdf_buffers:
+                        status.text(f'✅ {len(pdf_buffers)}개 PDF 생성 완료!')
+                        progress.progress(1.0)
+                        today = datetime.now().strftime('%Y%m%d_%H%M')
+
+                        if '병합' in download_mode:
+                            # 전체 병합 PDF
+                            merged = merge_pdfs(list(pdf_buffers.values()))
+                            st.download_button(
+                                label=f'⬇️ 전체 병합 PDF 다운로드 ({len(pdf_buffers)}페이지)',
+                                data=merged,
+                                file_name=f'출고지시서_전체_{today}.pdf',
+                                mime='application/pdf',
+                                key='p_dl_merged'
+                            )
+                        else:
+                            # 개별 ZIP
+                            zip_buf = io.BytesIO()
+                            with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                for gk, pdf_b in pdf_buffers.items():
+                                    safe_name = gk.replace('/', '_').replace('\\', '_')[:50]
+                                    zf.writestr(f'{safe_name}.pdf', pdf_b.read())
+                            zip_buf.seek(0)
+                            st.download_button(
+                                label=f'⬇️ ZIP 다운로드 ({len(pdf_buffers)}개 PDF)',
+                                data=zip_buf,
+                                file_name=f'출고지시서_{today}.zip',
+                                mime='application/zip',
+                                key='p_dl_zip'
+                            )
+            else:
+                st.warning('⚠️ 그룹화 기준을 하나 이상 선택해주세요.')
