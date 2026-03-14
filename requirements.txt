@@ -2,3 +2,5 @@ streamlit
 Pillow
 python-barcode
 openpyxl
+reportlab
+pypdf
