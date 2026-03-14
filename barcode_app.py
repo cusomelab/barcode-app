@@ -482,9 +482,9 @@ def merge_pdfs(pdf_buffers):
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='바코드 라벨 생성기', page_icon='🏷️', layout='centered')
-st.title('🏷️ 바코드 라벨 생성기')
-st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
+st.set_page_config(page_title='로켓배송 출고 생성기', page_icon='🚀', layout='centered')
+st.title('🚀 로켓배송 출고 생성기')
+st.caption('바코드 라벨 생성 · 출고 작업 지시서 PDF 변환')
 
 tab1, tab2, tab3 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF'])
 
