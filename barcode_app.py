@@ -483,7 +483,7 @@ def merge_pdfs(pdf_buffers):
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='wide')
+st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
@@ -943,7 +943,7 @@ with tab5:
     BANNED_KEYWORDS = ['공급가 협의','발주량 협의','가격 인상','단가','시즌 종료','일시적','잠정적']
     REQUIRED_KEYWORDS = ['영구적 생산 중단','영구적 취급 중단','영구적 생산중단','영구적 취급중단']
 
-    col_left, col_right = st.columns([1, 1])
+    col_left, col_right = st.columns([1, 1.5])
 
     with col_left:
         st.subheader('📋 공문 정보 입력')
@@ -1109,7 +1109,7 @@ with tab5:
             doc_number, doc_date, reason_detail, sku_list,
             stamp_data, stamp_size
         )
-        components_v1.html(html, height=900, scrolling=True)
+        components_v1.html(html, height=1000, scrolling=True)
 
         st.divider()
 
