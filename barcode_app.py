@@ -1277,15 +1277,15 @@ with tab6:
     with col_l:
         st.subheader('✏️ 정보 입력')
 
-        product_name = st.text_input('상품명 (품명)', placeholder='예: 여성용 니트 티셔츠', key='hl_name')
-        size = st.text_input('호칭 (치수)', value='Free', key='hl_size')
+        product_name = st.text_input('상품명 (품명)', placeholder='예: 여성용 니트 티셔츠', key='hangul_name')
+        size = st.text_input('호칭 (치수)', value='Free', key='hangul_size')
         composition = st.text_area('섬유의 조성 및 혼용률',
             value='겉감: 면 100%',
-            height=80, key='hl_comp',
+            height=80, key='hangul_comp',
             placeholder='겉감: 면 100%\n안감: 폴리에스터 100%')
         custom_caution = st.text_area('추가 주의사항',
             value='본 제품은 소재 특성상 마찰에 의해 보풀이 일어날 수 있으니 주의하십시오.',
-            height=80, key='hl_caution')
+            height=80, key='hangul_caution')
 
         st.markdown('**취급상 주의사항 선택** (최소 4개)')
         selected_symbols = []
@@ -1371,7 +1371,7 @@ with tab6:
         cv1.html(label_html, height=480)
 
         # PNG 다운로드 (Pillow로 생성)
-        if st.button('⬇️ 이미지 다운로드 (PNG)', type='primary', key='hl_dl'):
+        if st.button('⬇️ 이미지 다운로드 (PNG)', type='primary', key='hangul_dl'):
             try:
                 from PIL import Image as PILImage, ImageDraw, ImageFont
 
@@ -1523,12 +1523,12 @@ with tab6:
     with col_form:
         st.subheader('📋 정보 입력')
 
-        product_name = st.text_input('상품명 (품명)', placeholder='예: 여성용 니트 티셔츠', key='hl_name')
-        size = st.text_input('호칭 (치수)', value='Free', key='hl_size')
-        composition = st.text_area('섬유의 조성 및 혼용률', value='겉감: 면 100%', height=80, key='hl_comp')
+        product_name = st.text_input('상품명 (품명)', placeholder='예: 여성용 니트 티셔츠', key='hangul_name')
+        size = st.text_input('호칭 (치수)', value='Free', key='hangul_size')
+        composition = st.text_area('섬유의 조성 및 혼용률', value='겉감: 면 100%', height=80, key='hangul_comp')
         custom_caution = st.text_area('추가 주의사항', 
             value='본 제품은 소재 특성상 마찰에 의해 보풀이 일어날 수 있으니 주의하십시오.',
-            height=80, key='hl_caution')
+            height=80, key='hangul_caution')
 
         st.divider()
         st.markdown('**취급상 주의사항 선택**')
@@ -1539,7 +1539,7 @@ with tab6:
                 for sym_name, (icon, desc) in symbols.items():
                     if st.checkbox(f'{icon} {sym_name}', 
                                    value=sym_name in ['30℃ 중성 손세탁', '표백 금지', '140~160℃ 다림질', '석유계 드라이클리닝'],
-                                   key=f'hl_{sym_name}'):
+                                   key=f'hangul_sym_{sym_name}'):
                         selected_symbols.append((sym_name, icon, desc))
 
         if len(selected_symbols) < 4:
@@ -1550,7 +1550,7 @@ with tab6:
     with col_preview:
         st.subheader('👁️ 미리보기 & 다운로드')
 
-        if st.button('🖼️ 라벨 이미지 생성', type='primary', key='hl_gen'):
+        if st.button('🖼️ 라벨 이미지 생성', type='primary', key='hangul_gen'):
             try:
                 from PIL import Image, ImageDraw, ImageFont
                 import textwrap
@@ -1649,7 +1649,7 @@ with tab6:
                     data=buf,
                     file_name=f'한글표시사항_{product_name or "label"}_{today}.png',
                     mime='image/png',
-                    key='hl_dl'
+                    key='hangul_dl'
                 )
                 st.success('✅ 라벨 생성 완료!')
 
