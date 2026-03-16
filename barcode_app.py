@@ -4,6 +4,7 @@
 import os, io, urllib.request, csv, zipfile
 from datetime import datetime, timedelta
 import streamlit as st
+import streamlit.components.v1 as components_v1
 from PIL import Image, ImageDraw, ImageFont
 import barcode
 from barcode.writer import ImageWriter
@@ -482,11 +483,11 @@ def merge_pdfs(pdf_buffers):
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='로켓배송 출고 생성기', page_icon='🚀', layout='centered')
-st.title('🚀 로켓배송 출고 생성기')
-st.caption('바코드 라벨 생성 · 출고 작업 지시서 PDF 변환')
+st.set_page_config(page_title='바코드 라벨 생성기', page_icon='🏷️', layout='centered')
+st.title('🏷️ 바코드 라벨 생성기')
+st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2, tab3 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF'])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -703,3 +704,518 @@ with tab3:
                             )
             else:
                 st.warning('⚠️ 그룹화 기준을 하나 이상 선택해주세요.')
+
+# ══════════════════════════════════════════════════════
+# 탭4: PDF 병합
+# ══════════════════════════════════════════════════════
+with tab4:
+    st.header('📎 PDF 병합')
+    st.caption('여러 PDF 파일을 하나로 합칩니다. 드래그로 순서 조정 가능')
+
+    uploaded_pdfs = st.file_uploader(
+        'PDF 파일 업로드 (여러 개 선택 가능)',
+        type=['pdf'],
+        accept_multiple_files=True,
+        key='merge_pdfs'
+    )
+
+    if uploaded_pdfs:
+        st.markdown(f'**{len(uploaded_pdfs)}개 파일 선택됨**')
+        
+        # 파일 순서 표시
+        for i, f in enumerate(uploaded_pdfs):
+            st.text(f'  {i+1}. {f.name}')
+
+        if st.button('🔗 PDF 병합 시작', type='primary', key='merge_btn'):
+            try:
+                writer = PdfWriter()
+                for pdf_file in uploaded_pdfs:
+                    reader = PdfReader(pdf_file)
+                    for page in reader.pages:
+                        writer.add_page(page)
+                
+                out_buf = io.BytesIO()
+                writer.write(out_buf)
+                out_buf.seek(0)
+                
+                today = datetime.now().strftime('%Y%m%d_%H%M')
+                st.success(f'✅ {len(uploaded_pdfs)}개 PDF 병합 완료!')
+                st.download_button(
+                    label='⬇️ 병합된 PDF 다운로드',
+                    data=out_buf,
+                    file_name=f'병합_{today}.pdf',
+                    mime='application/pdf',
+                    key='merge_dl'
+                )
+            except Exception as e:
+                st.error(f'❌ 오류: {e}')
+
+# ══════════════════════════════════════════════════════
+# 탭5: PDF → 이미지
+# ══════════════════════════════════════════════════════
+# PDF→이미지 기능 제거됨
+    st.caption('PDF 각 페이지를 PNG 이미지로 변환합니다')
+
+    pdf_to_img_file = st.file_uploader(
+        'PDF 파일 업로드',
+        type=['pdf'],
+        key='pdf_to_img'
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        img_format = st.selectbox('이미지 형식', ['PNG', 'JPEG'], key='img_fmt')
+    with col2:
+        dpi = st.selectbox('해상도 (DPI)', [72, 150, 200, 300], index=2, key='img_dpi')
+
+    if pdf_to_img_file:
+        if st.button('🖼️ 변환 시작', type='primary', key='pdf_img_btn'):
+            try:
+                import fitz  # PyMuPDF
+                
+                pdf_bytes = pdf_to_img_file.read()
+                doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+                total_pages = len(doc)
+                
+                st.info(f'총 {total_pages}페이지 변환 중...')
+                progress = st.progress(0)
+                
+                img_buffers = []
+                for i, page in enumerate(doc):
+                    mat = fitz.Matrix(dpi/72, dpi/72)
+                    pix = page.get_pixmap(matrix=mat)
+                    img_buf = io.BytesIO(pix.tobytes(output=img_format.lower()))
+                    img_buffers.append((f'page_{i+1:03d}.{img_format.lower()}', img_buf.getvalue()))
+                    progress.progress((i+1)/total_pages)
+                
+                doc.close()
+                
+                if len(img_buffers) == 1:
+                    st.success('✅ 변환 완료!')
+                    st.download_button(
+                        label=f'⬇️ 이미지 다운로드',
+                        data=img_buffers[0][1],
+                        file_name=img_buffers[0][0],
+                        mime=f'image/{img_format.lower()}',
+                        key='pdf_img_dl'
+                    )
+                else:
+                    # ZIP으로 묶기
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for fname, data in img_buffers:
+                            zf.writestr(fname, data)
+                    zip_buf.seek(0)
+                    today = datetime.now().strftime('%Y%m%d_%H%M')
+                    st.success(f'✅ {total_pages}페이지 변환 완료!')
+                    st.download_button(
+                        label=f'⬇️ 전체 이미지 ZIP 다운로드 ({total_pages}장)',
+                        data=zip_buf,
+                        file_name=f'pdf_images_{today}.zip',
+                        mime='application/zip',
+                        key='pdf_img_zip_dl'
+                    )
+                    
+            except ImportError:
+                st.error('❌ PyMuPDF 라이브러리가 필요합니다. requirements.txt에 pymupdf를 추가하세요.')
+            except Exception as e:
+                st.error(f'❌ 오류: {e}')
+
+# ══════════════════════════════════════════════════════
+# 탭6: 이미지 → PDF
+# ══════════════════════════════════════════════════════
+# 이미지→PDF 기능 제거됨
+    st.caption('여러 이미지를 하나의 PDF로 변환합니다')
+
+    img_files = st.file_uploader(
+        '이미지 파일 업로드 (JPG, PNG, WEBP)',
+        type=['jpg', 'jpeg', 'png', 'webp'],
+        accept_multiple_files=True,
+        key='img_to_pdf'
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        page_size = st.selectbox('페이지 크기', ['A4', 'A3', '원본 비율 유지'], key='page_size')
+    with col2:
+        margin_mm = st.slider('여백 (mm)', 0, 30, 10, key='img_margin')
+
+    if img_files:
+        st.markdown(f'**{len(img_files)}개 이미지 선택됨**')
+        
+        # 미리보기
+        cols = st.columns(min(len(img_files), 4))
+        for i, img_f in enumerate(img_files[:4]):
+            with cols[i]:
+                st.image(img_f, caption=img_f.name, use_container_width=True)
+        if len(img_files) > 4:
+            st.caption(f'... 외 {len(img_files)-4}개')
+
+        if st.button('📄 PDF 변환 시작', type='primary', key='img_pdf_btn'):
+            try:
+                from reportlab.lib.pagesizes import A4, A3
+                from reportlab.platypus import SimpleDocTemplate, Image as RLImage
+                from reportlab.lib.units import mm
+                
+                out_buf = io.BytesIO()
+                
+                if page_size == 'A4':
+                    ps = A4
+                elif page_size == 'A3':
+                    ps = A3
+                else:
+                    ps = None
+                
+                margin = margin_mm * mm
+                
+                if ps:
+                    doc = SimpleDocTemplate(
+                        out_buf,
+                        pagesize=ps,
+                        leftMargin=margin, rightMargin=margin,
+                        topMargin=margin, bottomMargin=margin
+                    )
+                    w = ps[0] - 2*margin
+                    h = ps[1] - 2*margin
+                    
+                    story = []
+                    for i, img_f in enumerate(img_files):
+                        img_buf = io.BytesIO(img_f.read())
+                        pil_img = Image.open(img_buf)
+                        iw, ih = pil_img.size
+                        ratio = min(w/iw, h/ih)
+                        rw, rh = iw*ratio, ih*ratio
+                        img_buf.seek(0)
+                        rl_img = RLImage(img_buf, width=rw, height=rh)
+                        story.append(rl_img)
+                        if i < len(img_files)-1:
+                            from reportlab.platypus import PageBreak
+                            story.append(PageBreak())
+                    
+                    doc.build(story)
+                else:
+                    # 원본 비율 유지 - 첫 이미지 크기로 페이지 설정
+                    writer_pdf = PdfWriter()
+                    for img_f in img_files:
+                        img_buf = io.BytesIO(img_f.read())
+                        pil_img = Image.open(img_buf).convert('RGB')
+                        iw, ih = pil_img.size
+                        single_buf = io.BytesIO()
+                        
+                        tmp_doc = SimpleDocTemplate(
+                            single_buf,
+                            pagesize=(iw, ih),
+                            leftMargin=margin, rightMargin=margin,
+                            topMargin=margin, bottomMargin=margin
+                        )
+                        pw = iw - 2*margin
+                        ph = ih - 2*margin
+                        img_buf.seek(0)
+                        story = [RLImage(img_buf, width=pw, height=ph)]
+                        tmp_doc.build(story)
+                        single_buf.seek(0)
+                        r = PdfReader(single_buf)
+                        for page in r.pages:
+                            writer_pdf.add_page(page)
+                    
+                    writer_pdf.write(out_buf)
+                
+                out_buf.seek(0)
+                today = datetime.now().strftime('%Y%m%d_%H%M')
+                st.success(f'✅ {len(img_files)}개 이미지 → PDF 변환 완료!')
+                st.download_button(
+                    label='⬇️ PDF 다운로드',
+                    data=out_buf,
+                    file_name=f'images_to_pdf_{today}.pdf',
+                    mime='application/pdf',
+                    key='img_pdf_dl'
+                )
+            except Exception as e:
+                st.error(f'❌ 오류: {e}')
+
+# ══════════════════════════════════════════════════════
+# 탭7: 로켓배송 발주 중단 공문 작성
+# ══════════════════════════════════════════════════════
+with tab5:
+    st.header('📝 로켓배송 발주 중단 공문')
+    st.caption('쿠팡 로켓배송 상품 영구적 발주 중단 요청 공문을 자동으로 생성합니다')
+
+    BANNED_KEYWORDS = ['공급가 협의','발주량 협의','가격 인상','단가','시즌 종료','일시적','잠정적']
+    REQUIRED_KEYWORDS = ['영구적 생산 중단','영구적 취급 중단','영구적 생산중단','영구적 취급중단']
+
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.subheader('📋 공문 정보 입력')
+
+        # 기본 정보
+        with st.expander('🏢 업체 정보', expanded=True):
+            company_name = st.text_input('업체명 *', placeholder='예: (주)마켓피아', key='gm_company')
+            representative = st.text_input('대표이사 성함 *', placeholder='예: 홍길동', key='gm_rep')
+            manager_name = st.text_input('담당자명', placeholder='예: 김담당', key='gm_mgr')
+            manager_contact = st.text_input('담당자 연락처', placeholder='예: 010-1234-5678', key='gm_contact')
+
+        with st.expander('📄 문서 정보', expanded=True):
+            doc_number = st.text_input(
+                '문서번호',
+                value=f'제 {datetime.now().year}-001호',
+                key='gm_docnum'
+            )
+            doc_date = st.date_input('문서 날짜', value=datetime.now(), key='gm_date')
+
+        with st.expander('✍️ 발주 중단 사유', expanded=True):
+            reason_type = st.radio(
+                '사유 유형',
+                ['생산 중단', '취급 중단', '직접 입력'],
+                horizontal=True,
+                key='gm_reason_type'
+            )
+
+            if reason_type == '생산 중단':
+                default_reason = '당사 제조사의 영구적 생산 중단으로 인하여 해당 상품의 지속적인 공급이 불가능하게 되었습니다.'
+            elif reason_type == '취급 중단':
+                default_reason = '당사의 영구적 취급 중단 결정으로 인하여 해당 상품의 지속적인 공급이 불가능하게 되었습니다.'
+            else:
+                default_reason = ''
+
+            reason_detail = st.text_area(
+                '사유 상세 내용 *',
+                value=default_reason,
+                height=120,
+                placeholder='반드시 "영구적 생산 중단" 또는 "영구적 취급 중단" 문구가 포함되어야 합니다.',
+                key='gm_reason'
+            )
+
+            # 사유 유효성 검사
+            has_banned = any(w in reason_detail for w in BANNED_KEYWORDS)
+            has_required = any(w in reason_detail for w in REQUIRED_KEYWORDS)
+
+            if reason_detail:
+                if has_banned:
+                    banned_found = [w for w in BANNED_KEYWORDS if w in reason_detail]
+                    st.error(f'⛔ 금지 키워드 포함: {", ".join(banned_found)}')
+                elif not has_required:
+                    st.warning('⚠️ "영구적 생산 중단" 또는 "영구적 취급 중단" 문구가 필요합니다')
+                else:
+                    st.success('✅ 사유 검증 통과')
+
+        with st.expander('🖊️ 직인 이미지 (선택)', expanded=False):
+            stamp_file = st.file_uploader('직인 이미지 업로드 (PNG 권장)', type=['png','jpg','jpeg'], key='gm_stamp')
+            if stamp_file:
+                st.image(stamp_file, width=100)
+                stamp_size = st.slider('직인 크기', 50, 200, 80, key='gm_stamp_size')
+            else:
+                stamp_size = 80
+
+        st.subheader('📊 SKU 목록')
+        sku_input_type = st.radio('입력 방식', ['엑셀 파일 업로드', '직접 입력'], horizontal=True, key='gm_sku_type')
+
+        sku_list = []
+
+        if sku_input_type == '엑셀 파일 업로드':
+            st.caption('A열: SKU ID, B열: 상품명 (1행은 헤더)')
+            sku_excel = st.file_uploader('엑셀 파일 업로드', type=['xlsx','xls'], key='gm_excel')
+            if sku_excel:
+                try:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(sku_excel)
+                    ws = wb.active
+                    for row in ws.iter_rows(min_row=2, values_only=True):
+                        if row[0] and row[1]:
+                            sku_list.append({'id': str(row[0]).strip(), 'name': str(row[1]).strip()})
+                    if sku_list:
+                        st.success(f'✅ {len(sku_list)}개 SKU 로드됨')
+                        st.dataframe(sku_list[:5], hide_index=True)
+                        if len(sku_list) > 5:
+                            st.caption(f'... 외 {len(sku_list)-5}개')
+                    else:
+                        st.error('SKU 데이터를 읽지 못했습니다')
+                except Exception as e:
+                    st.error(f'파일 읽기 오류: {e}')
+        else:
+            st.caption('SKU ID와 상품명을 입력하세요')
+            num_skus = st.number_input('SKU 수량', min_value=1, max_value=50, value=3, key='gm_num_sku')
+            for i in range(int(num_skus)):
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    sid = st.text_input(f'SKU ID {i+1}', key=f'gm_sid_{i}')
+                with c2:
+                    sname = st.text_input(f'상품명 {i+1}', key=f'gm_sname_{i}')
+                if sid and sname:
+                    sku_list.append({'id': sid, 'name': sname})
+
+    with col_right:
+        st.subheader('👁️ 미리보기')
+
+        # 공문 미리보기 HTML 생성
+        def make_letter_html(company, rep, mgr, contact, docnum, date, reason, skus, stamp_data=None, stamp_sz=80):
+            date_str = date.strftime('%Y년 %m월 %d일') if hasattr(date, 'strftime') else str(date)
+            sku_rows = ''
+            for sku in skus:
+                sku_rows += f"""
+                <tr>
+                    <td style="border:1px solid black;padding:6px 8px;text-align:center">{sku['id']}</td>
+                    <td style="border:1px solid black;padding:6px 8px">{sku['name']}</td>
+                    <td style="border:1px solid black;padding:6px 8px;text-align:center">{reason[:30] + '...' if len(reason) > 30 else reason}</td>
+                </tr>"""
+            if not sku_rows:
+                sku_rows = '<tr><td colspan="3" style="border:1px solid black;padding:20px;text-align:center;color:#999">엑셀 파일을 업로드해 주세요</td></tr>'
+
+            stamp_html = ''
+            if stamp_data:
+                import base64
+                b64 = base64.b64encode(stamp_data).decode()
+                stamp_html = f'<img src="data:image/png;base64,{b64}" style="position:absolute;left:58%;top:50%;transform:translate(-50%,-50%);width:{stamp_sz}px;height:{stamp_sz}px;object-fit:contain;mix-blend-mode:multiply;pointer-events:none"/>'
+
+            return f"""
+            <div style="background:white;padding:25mm;width:100%;font-family:serif;font-size:11pt;line-height:1.6;color:black">
+                <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
+                    <tr><td style="width:110px;font-weight:bold;padding:3px 0">문서번호 :</td><td style="padding:3px 0">{docnum}</td></tr>
+                    <tr><td style="font-weight:bold;padding:3px 0">수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;신 :</td><td style="font-weight:bold;padding:3px 0">쿠팡 주식회사 귀중</td></tr>
+                    <tr><td style="font-weight:bold;padding:3px 0">발&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;신 :</td><td style="padding:3px 0"><b>{company or '[업체명]'}</b>&nbsp;/&nbsp;{mgr or '[담당자명]'}&nbsp;{contact or '[연락처]'}</td></tr>
+                    <tr><td style="font-weight:bold;padding:3px 0">제&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;목 :</td><td style="font-weight:bold;text-decoration:underline;padding:3px 0">로켓배송 상품 영구적 발주 중단 요청의 건</td></tr>
+                </table>
+                <hr style="border:1.5px solid black;margin:20px 0"/>
+                <p>1. 귀사의 무궁한 발전을 기원합니다.</p>
+                <p>2. 당사는 아래와 같은 불가피한 사유(영구적 생산 및 취급 중단)로 인해 해당 상품들의 공급을 지속할 수 없게 되었습니다. 이에 따라 로켓배송 서비스의 안정적인 운영을 위해 해당 제품들의 발주 중단을 정중히 요청드리는 바입니다.</p>
+                <div style="text-align:center;font-weight:bold;font-size:13pt;margin:20px 0;letter-spacing:4px">- 아 래 -</div>
+                <table style="width:100%;border-collapse:collapse;font-size:10pt;margin-bottom:30px">
+                    <thead>
+                        <tr style="background:#f3f4f6;text-align:center;font-weight:bold">
+                            <th style="border:1px solid black;padding:8px;width:20%">SKU ID</th>
+                            <th style="border:1px solid black;padding:8px;width:45%">SKU 명칭</th>
+                            <th style="border:1px solid black;padding:8px;width:35%">발주 중단 사유</th>
+                        </tr>
+                    </thead>
+                    <tbody>{sku_rows}</tbody>
+                </table>
+                <div style="text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb">
+                    <div style="font-size:13pt;font-weight:bold;margin-bottom:30px;letter-spacing:2px">{date_str}</div>
+                    <h1 style="font-size:20pt;font-weight:bold;letter-spacing:6px;margin-bottom:30px">{company or '[업체명]'}</h1>
+                    <div style="position:relative;display:inline-flex;align-items:center;gap:10px">
+                        <span style="font-size:14pt;font-weight:bold;letter-spacing:4px">대표이사&nbsp;&nbsp;{rep or '[성함]'}</span>
+                        <span style="font-size:13pt;font-weight:bold">(인)</span>
+                        {stamp_html}
+                    </div>
+                </div>
+            </div>"""
+
+        stamp_data = stamp_file.read() if stamp_file else None
+        if stamp_data:
+            stamp_file.seek(0)
+
+        html = make_letter_html(
+            company_name, representative, manager_name, manager_contact,
+            doc_number, doc_date, reason_detail, sku_list,
+            stamp_data, stamp_size
+        )
+        components_v1.html(html, height=700, scrolling=True)
+
+        st.divider()
+
+        # PDF 생성 & 다운로드
+        is_valid = (
+            company_name and representative and sku_list
+            and not has_banned and has_required
+        ) if reason_detail else False
+
+        if not is_valid:
+            if not company_name:
+                st.warning('업체명을 입력해주세요')
+            elif not representative:
+                st.warning('대표이사 성함을 입력해주세요')
+            elif not sku_list:
+                st.warning('SKU를 1개 이상 입력해주세요')
+            elif not reason_detail:
+                st.warning('발주 중단 사유를 입력해주세요')
+
+        if st.button('📄 공문 PDF 생성', type='primary', key='gm_pdf_btn', disabled=not is_valid):
+            try:
+                from reportlab.lib.pagesizes import A4
+                from reportlab.lib.units import mm
+                from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+                from reportlab.lib.styles import ParagraphStyle
+                from reportlab.lib import colors
+
+                buf = io.BytesIO()
+                doc = SimpleDocTemplate(
+                    buf, pagesize=A4,
+                    leftMargin=25*mm, rightMargin=25*mm,
+                    topMargin=20*mm, bottomMargin=20*mm
+                )
+
+                styles_normal = ParagraphStyle('normal', fontName='NanumReg', fontSize=10, leading=16)
+                styles_bold   = ParagraphStyle('bold',   fontName='NanumBold', fontSize=10, leading=16)
+                styles_title  = ParagraphStyle('title',  fontName='NanumBold', fontSize=14, leading=20, alignment=1)
+                styles_center = ParagraphStyle('center', fontName='NanumBold', fontSize=10, leading=16, alignment=1)
+                styles_big    = ParagraphStyle('big',    fontName='NanumBold', fontSize=18, leading=26, alignment=1, spaceAfter=10)
+
+                date_str = doc_date.strftime('%Y년 %m월 %d일')
+                story = []
+
+                # 헤더 테이블
+                header_data = [
+                    [Paragraph('문서번호 :', styles_bold), Paragraph(doc_number, styles_normal)],
+                    [Paragraph('수      신 :', styles_bold), Paragraph('쿠팡 주식회사 귀중', styles_bold)],
+                    [Paragraph('발      신 :', styles_bold), Paragraph(f'{company_name}  /  {manager_name}  {manager_contact}', styles_normal)],
+                    [Paragraph('제      목 :', styles_bold), Paragraph('<u>로켓배송 상품 영구적 발주 중단 요청의 건</u>', styles_bold)],
+                ]
+                header_table = Table(header_data, colWidths=[35*mm, None])
+                header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('BOTTOMPADDING', (0,0), (-1,-1), 4)]))
+                story.append(header_table)
+                story.append(HRFlowable(width='100%', thickness=1.5, color=colors.black, spaceAfter=12))
+
+                story.append(Paragraph('1. 귀사의 무궁한 발전을 기원합니다.', styles_normal))
+                story.append(Spacer(1, 8))
+                story.append(Paragraph('2. 당사는 아래와 같은 불가피한 사유(영구적 생산 및 취급 중단)로 인해 해당 상품들의 공급을 지속할 수 없게 되었습니다. 이에 따라 로켓배송 서비스의 안정적인 운영을 위해 해당 제품들의 발주 중단을 정중히 요청드리는 바입니다.', styles_normal))
+                story.append(Spacer(1, 16))
+                story.append(Paragraph('- 아 래 -', styles_center))
+                story.append(Spacer(1, 12))
+
+                # SKU 테이블
+                sku_table_data = [
+                    [Paragraph('SKU ID', styles_bold), Paragraph('SKU 명칭', styles_bold), Paragraph('발주 중단 사유', styles_bold)]
+                ]
+                for sku in sku_list:
+                    sku_table_data.append([
+                        Paragraph(sku['id'], styles_normal),
+                        Paragraph(sku['name'], styles_normal),
+                        Paragraph(reason_detail[:50] + ('...' if len(reason_detail) > 50 else ''), styles_normal)
+                    ])
+
+                sku_table = Table(sku_table_data, colWidths=[35*mm, 75*mm, 50*mm])
+                sku_table.setStyle(TableStyle([
+                    ('GRID', (0,0), (-1,-1), 1, colors.black),
+                    ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+                    ('ALIGN', (0,0), (0,-1), 'CENTER'),
+                    ('ALIGN', (2,0), (2,-1), 'CENTER'),
+                    ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                    ('TOPPADDING', (0,0), (-1,-1), 6),
+                    ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                ]))
+                story.append(sku_table)
+                story.append(Spacer(1, 30))
+
+                # 서명
+                story.append(Paragraph(date_str, styles_center))
+                story.append(Spacer(1, 20))
+                story.append(Paragraph(company_name, styles_big))
+                story.append(Spacer(1, 10))
+                story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
+
+                doc.build(story)
+                buf.seek(0)
+
+                today = datetime.now().strftime('%Y%m%d')
+                st.success('✅ 공문 PDF 생성 완료!')
+                st.download_button(
+                    label='⬇️ 공문 PDF 다운로드',
+                    data=buf,
+                    file_name=f'발주중단공문_{company_name}_{today}.pdf',
+                    mime='application/pdf',
+                    key='gm_dl'
+                )
+            except Exception as e:
+                st.error(f'❌ PDF 생성 오류: {e}')
+                import traceback
+                st.code(traceback.format_exc())
