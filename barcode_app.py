@@ -487,7 +487,7 @@ st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', la
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🏷️ 한글표시사항'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -1217,5 +1217,251 @@ with tab5:
                 )
             except Exception as e:
                 st.error(f'❌ PDF 생성 오류: {e}')
+                import traceback
+                st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════
+# 탭6: 한글표시사항 생성
+# ══════════════════════════════════════════════════════
+with tab6:
+    st.header('🏷️ 한글표시사항 생성')
+    st.caption('의류 케어라벨(5×7cm)을 자동 생성하고 이미지로 다운로드합니다')
+
+    # 고정 정보
+    FIXED = {
+        'importer': '주식회사 폰이지',
+        'address': '서울시 영등포구 영등포로109, 722호',
+        'phone': '010-3924-0084',
+        'country': '중국',
+        'date': datetime.now().strftime('%Y.%m'),
+    }
+
+    # 케어 심볼 정의
+    CARE_SYMBOLS_DEF = {
+        '물세탁': {
+            '95℃ 세탁': '물 온도 95℃로 세탁 가능, 삶을 수 있습니다',
+            '60℃ 세탁': '물 온도 60℃로 세탁 가능합니다',
+            '40℃ 세탁': '물 온도 40℃로 세탁 가능합니다',
+            '약 40℃ 세탁': '물 온도 40℃로 약하게 세탁해 주세요',
+            '30℃ 세탁': '물 온도 30℃로 세탁 가능합니다',
+            '손세탁 30℃': '물 온도 30℃에서 손세탁 해주세요 (세탁기 사용 불가)',
+            '물세탁 금지': '물세탁이 불가능한 제품입니다',
+        },
+        '표백': {
+            '염소 표백 가능': '염소계 표백제 사용이 가능합니다',
+            '산소 표백만 가능': '산소계 표백제만 사용 가능합니다',
+            '표백 금지': '표백제 사용이 불가능합니다',
+        },
+        '다림질': {
+            '저온(80-120℃)': '80-120℃ 저온으로 다림질 가능합니다',
+            '중온(140-160℃)': '140-160℃ 중온으로 다림질 가능합니다',
+            '고온(180-210℃)': '180-210℃ 고온으로 다림질 가능합니다',
+            '스팀 금지': '스팀 없이 다림질 해주세요',
+            '다림질 금지': '다림질이 불가능합니다',
+        },
+        '드라이클리닝': {
+            '드라이클리닝 가능(석유계)': '석유계 용제로 드라이클리닝 가능합니다',
+            '드라이클리닝 가능(F용제)': 'F 용제로 드라이클리닝 가능합니다',
+            '드라이클리닝 금지': '드라이클리닝이 불가능합니다',
+        },
+        '건조': {
+            '뉘어서 건조': '평평하게 뉘어서 건조해 주세요',
+            '그늘에서 건조': '직사광선을 피해 그늘에서 건조해 주세요',
+            '걸어서 건조': '옷걸이에 걸어서 건조해 주세요',
+            '드럼건조 금지': '드럼 건조기 사용이 불가능합니다',
+        },
+    }
+
+    col_l, col_r = st.columns([1, 1])
+
+    with col_l:
+        st.subheader('✏️ 정보 입력')
+
+        product_name = st.text_input('상품명 (품명)', placeholder='예: 여성용 니트 티셔츠', key='hl_name')
+        size = st.text_input('호칭 (치수)', value='Free', key='hl_size')
+        composition = st.text_area('섬유의 조성 및 혼용률',
+            value='겉감: 면 100%',
+            height=80, key='hl_comp',
+            placeholder='겉감: 면 100%\n안감: 폴리에스터 100%')
+        custom_caution = st.text_area('추가 주의사항',
+            value='본 제품은 소재 특성상 마찰에 의해 보풀이 일어날 수 있으니 주의하십시오.',
+            height=80, key='hl_caution')
+
+        st.markdown('**취급상 주의사항 선택** (최소 4개)')
+        selected_symbols = []
+        selected_descs = []
+
+        for category, items in CARE_SYMBOLS_DEF.items():
+            with st.expander(category, expanded=(category in ['물세탁', '표백'])):
+                choice = st.radio(f'{category} 선택',
+                    ['선택 안 함'] + list(items.keys()),
+                    key=f'hl_{category}')
+                if choice != '선택 안 함':
+                    selected_symbols.append(choice)
+                    selected_descs.append(items[choice])
+
+        if len(selected_symbols) < 4:
+            st.warning(f'⚠️ {len(selected_symbols)}개 선택됨 (최소 4개 권장)')
+        else:
+            st.success(f'✅ {len(selected_symbols)}개 선택됨')
+
+    with col_r:
+        st.subheader('👁️ 미리보기 & 다운로드')
+
+        # 라벨 HTML 생성
+        symbols_html = ''
+        for sym in selected_symbols:
+            symbols_html += f'<span style="display:inline-block;border:1px solid #333;padding:2px 6px;margin:2px;font-size:9px;font-weight:bold">{sym}</span>'
+
+        desc_html = ''
+        for desc in selected_descs:
+            desc_html += f'<p style="margin:1px 0;font-size:9px">- {desc}</p>'
+        if custom_caution:
+            for line in custom_caution.split('\n'):
+                if line.strip():
+                    desc_html += f'<p style="margin:1px 0;font-size:9px">- {line.strip()}</p>'
+
+        comp_html = composition.replace('\n', '<br>')
+
+        label_html = f"""
+        <div style="background:white;width:320px;height:448px;padding:16px;border:2px solid black;
+                    font-family:sans-serif;font-size:11px;box-sizing:border-box;color:black">
+            <div style="text-align:center;border-bottom:2px solid black;padding-bottom:4px;margin-bottom:4px">
+                <strong style="font-size:14px;letter-spacing:3px">한글표시사항</strong>
+            </div>
+            <table style="width:100%;border-collapse:collapse;font-size:10px">
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="width:70px;font-weight:bold;padding:2px 0">품&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;명</td>
+                    <td style="padding:2px 4px">{product_name or '입력필요'}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0">호&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;칭</td>
+                    <td style="padding:2px 4px">{size}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0;vertical-align:top">섬유의 조성</td>
+                    <td style="padding:2px 4px">{comp_html}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0">제조국명</td>
+                    <td style="padding:2px 4px">{FIXED['country']}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0">제조연월</td>
+                    <td style="padding:2px 4px">{FIXED['date']}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0">수입자명</td>
+                    <td style="padding:2px 4px">{FIXED['importer']}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #aaa">
+                    <td style="font-weight:bold;padding:2px 0;vertical-align:top">주소 및<br>전화번호</td>
+                    <td style="padding:2px 4px;font-size:9px">{FIXED['address']}<br>{FIXED['phone']}</td>
+                </tr>
+            </table>
+            <div style="margin-top:4px">
+                <strong style="font-size:10px">취급상 주의사항</strong>
+                <div style="margin:3px 0">{symbols_html}</div>
+                <div style="margin-top:3px">{desc_html}</div>
+            </div>
+        </div>
+        """
+
+        import streamlit.components.v1 as cv1
+        cv1.html(label_html, height=480)
+
+        # PNG 다운로드 (Pillow로 생성)
+        if st.button('⬇️ 이미지 다운로드 (PNG)', type='primary', key='hl_dl'):
+            try:
+                from PIL import Image as PILImage, ImageDraw, ImageFont
+
+                # 라벨 크기: 5cm x 7cm @ 150dpi ≈ 295 x 413px (2배: 590x826)
+                W, H = 590, 826
+                img = PILImage.new('RGB', (W, H), 'white')
+                draw = ImageDraw.Draw(img)
+
+                try:
+                    font_b = ImageFont.truetype(FONT_PATH, 22)
+                    font_r = ImageFont.truetype(FONT_REG_PATH, 18)
+                    font_s = ImageFont.truetype(FONT_REG_PATH, 15)
+                    font_title = ImageFont.truetype(FONT_PATH, 30)
+                except:
+                    font_b = font_r = font_s = font_title = ImageFont.load_default()
+
+                pad = 28
+                y = pad
+
+                # 테두리
+                draw.rectangle([pad//2, pad//2, W-pad//2, H-pad//2], outline='black', width=3)
+
+                # 제목
+                title = '한글표시사항'
+                tw = draw.textlength(title, font=font_title)
+                draw.text(((W-tw)//2, y), title, fill='black', font=font_title)
+                y += 38
+                draw.line([(pad, y), (W-pad, y)], fill='black', width=2)
+                y += 8
+
+                # 행 데이터
+                rows = [
+                    ('품     명', product_name or '입력필요', font_r),
+                    ('호     칭', size, font_r),
+                    ('섬유의 조성', composition.replace('\n', ' / '), font_r),
+                    ('제조국명', FIXED['country'], font_r),
+                    ('제조연월', FIXED['date'], font_r),
+                    ('수입자명', FIXED['importer'], font_r),
+                    ('주소/전화', f"{FIXED['address']} {FIXED['phone']}", font_s),
+                ]
+                col1_w = 140
+                for label_text, value, fnt in rows:
+                    draw.text((pad, y), label_text, fill='black', font=font_b)
+                    # 긴 텍스트 줄바꿈
+                    max_w = W - pad - col1_w - 10
+                    words = value.split(' ')
+                    line, lines = '', []
+                    for word in words:
+                        test = line + ' ' + word if line else word
+                        if draw.textlength(test, font=fnt) < max_w:
+                            line = test
+                        else:
+                            lines.append(line); line = word
+                    lines.append(line)
+                    for li, ln in enumerate(lines):
+                        draw.text((pad + col1_w, y + li*20), ln, fill='black', font=fnt)
+                    row_h = max(24, len(lines)*20 + 6)
+                    y += row_h
+                    draw.line([(pad, y), (W-pad, y)], fill='#aaaaaa', width=1)
+                    y += 4
+
+                # 취급 심볼
+                y += 4
+                draw.text((pad, y), '취급상 주의사항', fill='black', font=font_b)
+                y += 26
+                for i, sym in enumerate(selected_symbols):
+                    sym_x = pad + (i % 4) * 130
+                    sym_y = y + (i // 4) * 30
+                    draw.rectangle([sym_x, sym_y, sym_x+120, sym_y+22], outline='#333', width=1)
+                    draw.text((sym_x+4, sym_y+3), sym, fill='black', font=font_s)
+                y += (len(selected_symbols)//4 + 1) * 30 + 6
+
+                # 설명 텍스트
+                for desc in selected_descs + ([c for c in custom_caution.split('\n') if c.strip()]):
+                    draw.text((pad, y), f'- {desc}', fill='#333333', font=font_s)
+                    y += 18
+
+                buf = io.BytesIO()
+                img.save(buf, format='PNG', dpi=(150, 150))
+                buf.seek(0)
+
+                st.success('✅ 이미지 생성 완료!')
+                st.download_button(
+                    label='💾 PNG 저장',
+                    data=buf,
+                    file_name=f'한글표시사항_{product_name or "label"}_{datetime.now().strftime("%Y%m%d")}.png',
+                    mime='image/png',
+                    key='hl_png'
+                )
+            except Exception as e:
+                st.error(f'❌ 오류: {e}')
                 import traceback
                 st.code(traceback.format_exc())
