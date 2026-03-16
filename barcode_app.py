@@ -1,5 +1,5 @@
 # ╔══════════════════════════════════════════════════════╗
-# ║         [쿠썸] 로켓배송 운영관리 - Streamlit         ║
+# ║         [쿠썸] 바코드 라벨 생성기 - Streamlit         ║
 # ╚══════════════════════════════════════════════════════╝
 import os, io, urllib.request, csv, zipfile
 from datetime import datetime, timedelta
@@ -483,8 +483,8 @@ def merge_pdfs(pdf_buffers):
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🏷️', layout='centered')
-st.title('🏷️ 로켓배송 운영 관리')
+st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='wide')
+st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
@@ -1068,7 +1068,7 @@ with tab5:
                 stamp_html = f'<img src="data:image/png;base64,{b64}" style="position:absolute;left:58%;top:50%;transform:translate(-50%,-50%);width:{stamp_sz}px;height:{stamp_sz}px;object-fit:contain;mix-blend-mode:multiply;pointer-events:none"/>'
 
             return f"""
-            <div style="background:white;padding:25mm;width:100%;font-family:serif;font-size:11pt;line-height:1.6;color:black">
+            <div style="background:white;padding:15px;width:100%;box-sizing:border-box;font-family:serif;font-size:9pt;line-height:1.6;color:black">
                 <table style="width:100%;border-collapse:collapse;margin-bottom:8px">
                     <tr><td style="width:110px;font-weight:bold;padding:3px 0">문서번호 :</td><td style="padding:3px 0">{docnum}</td></tr>
                     <tr><td style="font-weight:bold;padding:3px 0">수&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;신 :</td><td style="font-weight:bold;padding:3px 0">쿠팡 주식회사 귀중</td></tr>
@@ -1109,7 +1109,7 @@ with tab5:
             doc_number, doc_date, reason_detail, sku_list,
             stamp_data, stamp_size
         )
-        components_v1.html(html, height=700, scrolling=True)
+        components_v1.html(html, height=900, scrolling=True)
 
         st.divider()
 
