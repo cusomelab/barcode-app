@@ -4,3 +4,6 @@ python-barcode
 openpyxl
 reportlab
 pypdf
+gspread
+google-auth
+plotly
