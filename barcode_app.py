@@ -1,7 +1,8 @@
 # ╔══════════════════════════════════════════════════════╗
 # ║         [쿠썸] 바코드 라벨 생성기 - Streamlit         ║
 # ╚══════════════════════════════════════════════════════╝
-import os, io, urllib.request, csv, zipfile
+import os, io, re, urllib.request, csv, zipfile
+from collections import OrderedDict
 from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components_v1
@@ -20,6 +21,8 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from pypdf import PdfWriter, PdfReader
+import pdfplumber
+import pypdfium2 as pdfium
 
 # ── 폰트 준비 ──────────────────────────────────────────
 FONT_PATH = 'NanumGothicBold.ttf'
@@ -301,8 +304,9 @@ def group_items(items, grouping_keys):
     return grouped
 
 
-def create_work_order_pdf(group_key, items):
-    """reportlab으로 출고 작업 지시서 PDF 생성 → BytesIO 반환"""
+def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
+    """reportlab으로 출고 작업 지시서 PDF 생성 → BytesIO 반환
+    shipment_id/box_number가 있으면 상단 우측에 표시"""
     buf = io.BytesIO()
     PAGE_W, PAGE_H = A4
     MARGIN = 18 * mm
@@ -324,6 +328,7 @@ def create_work_order_pdf(group_key, items):
     s_td_bold = ParagraphStyle('tdbold',  fontName='NanumBold', fontSize=10, leading=12, textColor=colors.HexColor('#1a56db'))
     s_mono    = ParagraphStyle('mono',    fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
     s_footer  = ParagraphStyle('footer',  fontName='NanumReg',  fontSize=8,  leading=10, textColor=colors.HexColor('#888888'))
+    s_shipment= ParagraphStyle('shipment',fontName='NanumBold', fontSize=14, leading=18, textColor=colors.HexColor('#1a56db'), alignment=2)
 
     total_qty   = sum(i['quantity'] for i in items)
     first       = items[0]
@@ -333,8 +338,29 @@ def create_work_order_pdf(group_key, items):
 
     story = []
 
-    # ── 헤더 ──────────────────────────────────────────
-    story.append(Paragraph('출고 작업 지시서', s_title))
+    # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스 ──────────
+    if shipment_id and box_number:
+        shipment_text = f'쉽먼트 {shipment_id} | 박스 {box_number}'
+    elif shipment_id:
+        shipment_text = f'쉽먼트 {shipment_id}'
+    else:
+        shipment_text = ''
+
+    if shipment_text:
+        header_data = [[
+            Paragraph('출고 작업 지시서', s_title),
+            Paragraph(shipment_text, s_shipment),
+        ]]
+        header_tbl = Table(header_data, colWidths=[usable_w * 0.5, usable_w * 0.5])
+        header_tbl.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'BOTTOM'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+        ]))
+        story.append(header_tbl)
+    else:
+        story.append(Paragraph('출고 작업 지시서', s_title))
+
     story.append(Paragraph(group_key, s_sub))
     story.append(Spacer(1, 1*mm))
     story.append(HRFlowable(width='100%', thickness=2, color=colors.HexColor('#1a56db')))
@@ -487,7 +513,7 @@ st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', la
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -1219,3 +1245,407 @@ with tab5:
                 st.error(f'❌ PDF 생성 오류: {e}')
                 import traceback
                 st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════
+# 탭6: 쉽먼트 통합 관리
+# ══════════════════════════════════════════════════════
+
+# ── 쉽먼트 분석 헬퍼 함수들 ────────────────────────────
+
+def _extract_manifest_info(pdf_bytes):
+    """매니페스트 PDF 바이트에서 박스/송장 정보 추출"""
+    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+    pages_info = []
+    for i, page in enumerate(pdf.pages):
+        text = page.extract_text() or ''
+        box_match = re.search(r'박스\s*(\d+-\d+)', text)
+        invoice_match = re.search(r'송장번호\s*\n?\s*(\d{12,})', text)
+        if not invoice_match:
+            invoice_match = re.search(r'(4\d{11})', text)
+        pages_info.append({
+            'page_idx': i,
+            'box_number': box_match.group(1) if box_match else None,
+            'invoice_number': invoice_match.group(1) if invoice_match else None,
+            'is_main_page': box_match is not None
+        })
+    pdf.close()
+    return pages_info
+
+
+def _extract_label_info(pdf_bytes):
+    """라벨 PDF 바이트에서 박스/송장 정보 추출"""
+    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+    pages_info = []
+    for i, page in enumerate(pdf.pages):
+        text = page.extract_text() or ''
+        box_match = re.search(r'박스\s*(\d+-\d+)', text)
+        invoice_match = re.search(r'(4\d{11})', text)
+        pages_info.append({
+            'page_idx': i,
+            'box_number': box_match.group(1) if box_match else None,
+            'invoice_number': invoice_match.group(1) if invoice_match else None,
+        })
+    pdf.close()
+    return pages_info
+
+
+def _group_manifest_pages(pages_info):
+    """매니페스트 박스별 그룹핑"""
+    groups, current = [], None
+    for info in pages_info:
+        if info['is_main_page']:
+            if current:
+                groups.append(current)
+            current = {'box_number': info['box_number'], 'invoice_number': info['invoice_number'], 'page_indices': [info['page_idx']]}
+        else:
+            if current:
+                current['page_indices'].append(info['page_idx'])
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _group_label_pages(pages_info):
+    """라벨 박스별 그룹핑"""
+    box_groups = OrderedDict()
+    for info in pages_info:
+        box = info['box_number']
+        if box not in box_groups:
+            box_groups[box] = {'box_number': box, 'invoice_number': info['invoice_number'], 'page_indices': []}
+        box_groups[box]['page_indices'].append(info['page_idx'])
+        if not box_groups[box]['invoice_number'] and info['invoice_number']:
+            box_groups[box]['invoice_number'] = info['invoice_number']
+    return list(box_groups.values())
+
+
+def _render_labels_4up(pdf_bytes, sorted_groups, dpi=200):
+    """라벨 PDF → 이미지 렌더링 → 4분할 A4"""
+    pdf_doc = pdfium.PdfDocument(pdf_bytes)
+    all_indices = []
+    for g in sorted_groups:
+        all_indices.extend(g['page_indices'])
+
+    images = []
+    for idx in all_indices:
+        page = pdf_doc[idx]
+        bitmap = page.render(scale=dpi / 72)
+        images.append(bitmap.to_pil())
+    pdf_doc.close()
+
+    # 4-up
+    a4_w, a4_h = int(8.27 * dpi), int(11.69 * dpi)
+    slot_w, slot_h = a4_w // 2, a4_h // 2
+    result = []
+
+    for start in range(0, len(images), 4):
+        chunk = images[start:start + 4]
+        canvas = Image.new('RGB', (a4_w, a4_h), 'white')
+        positions = [(0, 0), (slot_w, 0), (0, slot_h), (slot_w, slot_h)]
+        for i, img in enumerate(chunk):
+            ratio = img.width / img.height
+            s_ratio = slot_w / slot_h
+            if ratio > s_ratio:
+                nw, nh = slot_w, int(slot_w / ratio)
+            else:
+                nh, nw = slot_h, int(slot_h * ratio)
+            resized = img.resize((nw, nh), Image.LANCZOS)
+            x = positions[i][0] + (slot_w - nw) // 2
+            y = positions[i][1] + (slot_h - nh) // 2
+            canvas.paste(resized, (x, y))
+        result.append(canvas)
+    return result
+
+
+def _parse_csv_bytes(csv_bytes):
+    """CSV 바이트 → 아이템 리스트"""
+    text = csv_bytes.decode('utf-8-sig', errors='replace')
+    reader = csv.reader(text.splitlines())
+    rows = list(reader)
+    if not rows:
+        return []
+    items = []
+    for row in rows[1:]:
+        if len(row) < 11 or not (row[1] if len(row) > 1 else '').strip():
+            continue
+        def safe(idx, default=''):
+            return row[idx].strip() if idx < len(row) else default
+        try:
+            qty = int(safe(7, '0') or '0')
+        except ValueError:
+            qty = 0
+        items.append({
+            'logisticsCenter': safe(1),
+            'expectedDate': safe(3),
+            'productBarcode': safe(5),
+            'productName': safe(6),
+            'quantity': qty,
+            'shipmentNumber': safe(8),
+            'orderDate': safe(9),
+            'boxNumber': safe(10),
+            'location': safe(12),
+        })
+    return items
+
+
+with tab6:
+    st.header('🚛 쉽먼트 통합 관리')
+    st.caption('CSV + 매니페스트 + 라벨을 한번에 업로드하면 출고지시서 생성 + 송장번호순 정렬 + 라벨 4분할 + 전체 통합 PDF를 만듭니다')
+
+    st.divider()
+
+    # ── 파일 업로드 ──────────────────────────────────
+    st.subheader('📂 파일 업로드')
+    st.caption('CSV 1개 + 매니페스트/라벨 PDF 여러 개를 한꺼번에 드래그 & 드롭하세요')
+
+    uploaded_files = st.file_uploader(
+        '파일 선택 (CSV + PDF)',
+        type=['csv', 'pdf'],
+        accept_multiple_files=True,
+        key='shipment_files'
+    )
+
+    if uploaded_files:
+        # 파일 분류
+        csv_file = None
+        manifest_files = {}
+        label_files = {}
+
+        for f in uploaded_files:
+            if f.name.lower().endswith('.csv'):
+                csv_file = f
+            elif 'manifest' in f.name.lower():
+                sid = re.search(r'\((\d+)\)', f.name)
+                if sid:
+                    manifest_files[sid.group(1)] = f
+            elif 'label' in f.name.lower():
+                sid = re.search(r'\((\d+)\)', f.name)
+                if sid:
+                    label_files[sid.group(1)] = f
+
+        # 짝 매칭
+        pairs = []
+        for sid in sorted(manifest_files.keys()):
+            if sid in label_files:
+                pairs.append((sid, manifest_files[sid], label_files[sid]))
+
+        # 미리보기 표시
+        st.markdown(f'**분류 결과:**')
+        if csv_file:
+            st.markdown(f'- CSV: `{csv_file.name}`')
+        else:
+            st.warning('CSV 파일이 없습니다. 출고지시서 없이 쉽먼트만 처리합니다.')
+
+        st.markdown(f'- 쉽먼트 세트: **{len(pairs)}개**')
+        for sid, m, l in pairs:
+            st.markdown(f'  - `[{sid}]` {m.name} + {l.name}')
+
+        # 매칭 안 된 파일 경고
+        for sid in manifest_files:
+            if sid not in label_files:
+                st.warning(f'쉽먼트 {sid}: 매니페스트만 있고 라벨 없음')
+        for sid in label_files:
+            if sid not in manifest_files:
+                st.warning(f'쉽먼트 {sid}: 라벨만 있고 매니페스트 없음')
+
+        if not pairs:
+            st.error('매칭되는 매니페스트/라벨 세트가 없습니다.')
+        else:
+            st.divider()
+
+            if st.button('🚀 통합 PDF 생성 시작', type='primary', key='shipment_btn'):
+                progress = st.progress(0)
+                status = st.empty()
+                total_steps = len(pairs) + (1 if csv_file else 0) + 1
+                step = 0
+
+                try:
+                    # ===== 1. 매니페스트 분석 → 송장→(쉽먼트ID, 박스) 매핑 =====
+                    status.text('📊 매니페스트 분석 중...')
+                    invoice_mapping = {}
+                    manifest_data = {}  # sid → (bytes, sorted_groups)
+
+                    for sid, mf, lf in pairs:
+                        m_bytes = mf.read()
+                        mf.seek(0)
+                        m_info = _extract_manifest_info(m_bytes)
+                        m_groups = _group_manifest_pages(m_info)
+                        sorted_m = sorted(m_groups, key=lambda g: g['invoice_number'] or '')
+                        manifest_data[sid] = (m_bytes, sorted_m)
+
+                        for g in sorted_m:
+                            if g['invoice_number']:
+                                invoice_mapping[g['invoice_number']] = (sid, g['box_number'])
+
+                    # ===== 2. CSV → 출고지시서 PDF 생성 =====
+                    so_pdf_buf = None
+                    if csv_file:
+                        status.text('📄 출고지시서 생성 중...')
+                        csv_bytes = csv_file.read()
+                        items = _parse_csv_bytes(csv_bytes)
+
+                        if items:
+                            # 송장번호별 그룹
+                            grouped = OrderedDict()
+                            for item in items:
+                                key = item.get('shipmentNumber', '')
+                                grouped.setdefault(key, []).append(item)
+
+                            # 각 그룹 내부 정렬
+                            for key in grouped:
+                                grouped[key].sort(key=lambda x: (
+                                    [int(c) if c.isdigit() else c.lower()
+                                     for c in re.split(r'(\d+)', x.get('boxNumber', ''))],
+                                    x.get('productName', '')
+                                ))
+
+                            pdf_bufs = []
+                            for inv_num in sorted(grouped.keys()):
+                                inv_items = grouped[inv_num]
+                                ship_id, box_num = invoice_mapping.get(inv_num, (None, None))
+                                center = inv_items[0].get('logisticsCenter', '')
+                                gk = f"{center}_{inv_num}" if center else inv_num
+                                pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, box_num)
+                                pdf_bufs.append(pdf_buf)
+
+                            # 병합
+                            so_writer = PdfWriter()
+                            for buf in pdf_bufs:
+                                reader = PdfReader(buf)
+                                for page in reader.pages:
+                                    so_writer.add_page(page)
+                            so_pdf_buf = io.BytesIO()
+                            so_writer.write(so_pdf_buf)
+                            so_pdf_buf.seek(0)
+
+                            st.success(f'출고지시서 {len(pdf_bufs)}건 생성 완료')
+
+                        step += 1
+                        progress.progress(step / total_steps)
+
+                    # ===== 3. 각 세트별 처리 =====
+                    set_bufs = []
+                    for sid, mf, lf in pairs:
+                        status.text(f'📦 쉽먼트 {sid} 처리 중...')
+
+                        m_bytes, sorted_m = manifest_data[sid]
+
+                        # 매니페스트 정렬
+                        m_reader = PdfReader(io.BytesIO(m_bytes))
+                        set_writer = PdfWriter()
+                        for g in sorted_m:
+                            for pidx in g['page_indices']:
+                                set_writer.add_page(m_reader.pages[pidx])
+                        manifest_count = len(set_writer.pages)
+
+                        # 라벨 4분할
+                        l_bytes = lf.read()
+                        lf.seek(0)
+                        l_info = _extract_label_info(l_bytes)
+                        l_groups = _group_label_pages(l_info)
+                        sorted_l = sorted(l_groups, key=lambda g: g['invoice_number'] or '')
+                        four_up = _render_labels_4up(l_bytes, sorted_l)
+
+                        for img in four_up:
+                            img_buf = io.BytesIO()
+                            img.save(img_buf, format='PDF', resolution=200)
+                            img_buf.seek(0)
+                            lp = PdfReader(img_buf)
+                            set_writer.add_page(lp.pages[0])
+
+                        label_count = len(four_up)
+
+                        set_buf = io.BytesIO()
+                        set_writer.write(set_buf)
+                        set_buf.seek(0)
+                        set_bufs.append((sid, set_buf, manifest_count, label_count))
+
+                        step += 1
+                        progress.progress(step / total_steps)
+
+                    # ===== 4. 전체 통합 =====
+                    status.text('📎 전체 통합 PDF 생성 중...')
+                    final_writer = PdfWriter()
+                    total_pages = 0
+
+                    # 출고지시서 맨 앞
+                    if so_pdf_buf:
+                        reader = PdfReader(so_pdf_buf)
+                        for page in reader.pages:
+                            final_writer.add_page(page)
+                        so_pages = len(reader.pages)
+                        total_pages += so_pages
+
+                    # 쉽먼트별
+                    for sid, buf, mc, lc in set_bufs:
+                        reader = PdfReader(buf)
+                        for page in reader.pages:
+                            final_writer.add_page(page)
+                        total_pages += len(reader.pages)
+
+                    final_buf = io.BytesIO()
+                    final_writer.write(final_buf)
+                    final_buf.seek(0)
+
+                    step += 1
+                    progress.progress(1.0)
+                    status.text('✅ 완료!')
+
+                    # ===== 결과 표시 =====
+                    st.divider()
+                    st.subheader('📋 처리 결과')
+
+                    result_data = []
+                    if so_pdf_buf:
+                        result_data.append({'구분': '출고지시서', '페이지': so_pages})
+                    for sid, buf, mc, lc in set_bufs:
+                        result_data.append({'구분': f'쉽먼트 {sid} (매니페스트)', '페이지': mc})
+                        result_data.append({'구분': f'쉽먼트 {sid} (라벨 4분할)', '페이지': lc})
+                    result_data.append({'구분': '전체 합계', '페이지': total_pages})
+                    st.dataframe(result_data, use_container_width=True, hide_index=True)
+
+                    st.divider()
+
+                    # ── 다운로드 버튼들 ────────────────────
+                    today = datetime.now().strftime('%Y%m%d_%H%M')
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.download_button(
+                            label=f'⬇️ 전체 통합 PDF ({total_pages}p)',
+                            data=final_buf,
+                            file_name=f'shipment_ALL_merged_{today}.pdf',
+                            mime='application/pdf',
+                            key='ship_dl_all',
+                            type='primary'
+                        )
+
+                    with col_b:
+                        if so_pdf_buf:
+                            so_pdf_buf.seek(0)
+                            st.download_button(
+                                label=f'⬇️ 출고지시서만 ({so_pages}p)',
+                                data=so_pdf_buf,
+                                file_name=f'출고지시서_{today}.pdf',
+                                mime='application/pdf',
+                                key='ship_dl_so'
+                            )
+
+                    # 개별 세트 다운로드
+                    if len(set_bufs) > 1:
+                        st.markdown('**개별 세트:**')
+                        cols = st.columns(min(len(set_bufs), 3))
+                        for i, (sid, buf, mc, lc) in enumerate(set_bufs):
+                            buf.seek(0)
+                            with cols[i % 3]:
+                                st.download_button(
+                                    label=f'쉽먼트 {sid} ({mc + lc}p)',
+                                    data=buf,
+                                    file_name=f'shipment_{sid}_{today}.pdf',
+                                    mime='application/pdf',
+                                    key=f'ship_dl_{sid}'
+                                )
+
+                except Exception as e:
+                    st.error(f'❌ 오류 발생: {e}')
+                    import traceback
+                    st.code(traceback.format_exc())
