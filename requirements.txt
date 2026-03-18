@@ -6,6 +6,3 @@ reportlab
 pypdf
 pdfplumber
 pypdfium2
-gspread
-google-auth
-plotly
