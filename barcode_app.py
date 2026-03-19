@@ -1318,7 +1318,7 @@ def _group_label_pages(pages_info):
     return list(box_groups.values())
 
 
-def _render_labels_4up(pdf_bytes, sorted_groups, dpi=200):
+def _render_labels_4up(pdf_bytes, sorted_groups, dpi=300):
     """라벨 PDF → 이미지 렌더링 → 4분할 A4"""
     pdf_doc = pdfium.PdfDocument(pdf_bytes)
     all_indices = []
@@ -1557,7 +1557,7 @@ with tab6:
                         four_up = _render_labels_4up(l_bytes, sorted_l)
                         for img in four_up:
                             img_buf = io.BytesIO()
-                            img.save(img_buf, format='PDF', resolution=200)
+                            img.save(img_buf, format='PDF', resolution=300)
                             img_buf.seek(0)
                             lp = PdfReader(img_buf)
                             shipment_only_writer.add_page(lp.pages[0])
@@ -1568,15 +1568,28 @@ with tab6:
                     shipment_only_pages = len(PdfReader(io.BytesIO(shipment_only_buf.getvalue())).pages)
 
                     # ===== 4. 전체 통합 =====
-                    # 순서: [출고지시서1→매니페스트1] → [출고지시서2→매니페스트2] → ... → 라벨 전체
+                    # 순서: [출고지시서→매니페스트→라벨] 송장번호순 통합
                     status.text('📎 전체 통합 PDF 생성 중...')
                     final_writer = PdfWriter()
                     total_pages = 0
+                    label_total = 0
 
-                    # 송장번호순 출고지시서→매니페스트 교차 배치
+                    # 송장번호별 라벨 그룹 매핑 (sid → {invoice → [groups]})
+                    label_by_invoice = {}
+                    for sid, mf, lf in pairs:
+                        l_bytes, sorted_l = label_data[sid]
+                        inv_map = {}
+                        for g in sorted_l:
+                            inv = g['invoice_number'] or ''
+                            inv_map.setdefault(inv, []).append(g)
+                        label_by_invoice[sid] = inv_map
+
+                    # 송장번호순 출고지시서→매니페스트→라벨 통합 배치
                     for sid, mf, lf in pairs:
                         m_bytes, sorted_m = manifest_data[sid]
                         m_reader = PdfReader(io.BytesIO(m_bytes))
+                        l_bytes, sorted_l = label_data[sid]
+
                         for g in sorted_m:
                             inv = g['invoice_number']
                             # 출고지시서 먼저
@@ -1591,20 +1604,31 @@ with tab6:
                             for pidx in g['page_indices']:
                                 final_writer.add_page(m_reader.pages[pidx])
                                 total_pages += 1
+                            # 해당 송장의 라벨 바로 뒤에 배치
+                            inv_key = inv or ''
+                            if inv_key in label_by_invoice.get(sid, {}):
+                                inv_label_groups = label_by_invoice[sid].pop(inv_key)
+                                four_up = _render_labels_4up(l_bytes, inv_label_groups)
+                                for img in four_up:
+                                    img_buf = io.BytesIO()
+                                    img.save(img_buf, format='PDF', resolution=300)
+                                    img_buf.seek(0)
+                                    lp = PdfReader(img_buf)
+                                    final_writer.add_page(lp.pages[0])
+                                    total_pages += 1
+                                    label_total += 1
 
-                    # 라벨 4분할 마지막에 모아서
-                    label_total = 0
-                    for sid, mf, lf in pairs:
-                        l_bytes, sorted_l = label_data[sid]
-                        four_up = _render_labels_4up(l_bytes, sorted_l)
-                        for img in four_up:
-                            img_buf = io.BytesIO()
-                            img.save(img_buf, format='PDF', resolution=200)
-                            img_buf.seek(0)
-                            lp = PdfReader(img_buf)
-                            final_writer.add_page(lp.pages[0])
-                            total_pages += 1
-                            label_total += 1
+                        # 매칭 안 된 나머지 라벨 처리
+                        for inv_key, groups in label_by_invoice.get(sid, {}).items():
+                            four_up = _render_labels_4up(l_bytes, groups)
+                            for img in four_up:
+                                img_buf = io.BytesIO()
+                                img.save(img_buf, format='PDF', resolution=300)
+                                img_buf.seek(0)
+                                lp = PdfReader(img_buf)
+                                final_writer.add_page(lp.pages[0])
+                                total_pages += 1
+                                label_total += 1
 
                     final_buf = io.BytesIO()
                     final_writer.write(final_buf)
@@ -1624,7 +1648,7 @@ with tab6:
 | 라벨 4분할 | {label_total}p |
 | **전체 합계** | **{total_pages}p** |
 """)
-                    st.caption('순서: 출고지시서→매니페스트 (송장번호순 교차) → 라벨 (마지막)')
+                    st.caption('순서: [출고지시서→매니페스트→라벨] 송장번호순 통합 배치')
 
                     st.divider()
 
