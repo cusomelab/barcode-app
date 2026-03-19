@@ -513,7 +513,7 @@ st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', la
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합'])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -1686,6 +1686,263 @@ with tab6:
                                 mime='application/pdf',
                                 key='ship_dl_so'
                             )
+
+                except Exception as e:
+                    st.error(f'❌ 오류 발생: {e}')
+                    import traceback
+                    st.code(traceback.format_exc())
+
+# ── 쉽먼트 재출력 탭 ──────────────────────────────────────
+with tab7:
+    st.header('🔄 쉽먼트 재출력')
+    st.caption('CSV(출고지시서)의 송장번호와 매니페스트/라벨의 송장번호를 매칭하여, CSV에 있는 송장만 골라 재출력합니다')
+
+    st.divider()
+
+    st.subheader('📂 파일 업로드')
+    st.caption('CSV 1개(필수) + 매니페스트/라벨 PDF를 업로드하세요')
+
+    reprint_files = st.file_uploader(
+        '파일 선택 (CSV + PDF)',
+        type=['csv', 'pdf'],
+        accept_multiple_files=True,
+        key='reprint_files'
+    )
+
+    if reprint_files:
+        rp_csv = None
+        rp_manifests = {}
+        rp_labels = {}
+
+        for f in reprint_files:
+            if f.name.lower().endswith('.csv'):
+                rp_csv = f
+            elif 'manifest' in f.name.lower():
+                sid = re.search(r'\((\d+)\)', f.name)
+                if sid:
+                    rp_manifests[sid.group(1)] = f
+            elif 'label' in f.name.lower():
+                sid = re.search(r'\((\d+)\)', f.name)
+                if sid:
+                    rp_labels[sid.group(1)] = f
+
+        rp_pairs = []
+        for sid in sorted(rp_manifests.keys()):
+            if sid in rp_labels:
+                rp_pairs.append((sid, rp_manifests[sid], rp_labels[sid]))
+
+        st.markdown(f'**분류 결과:**')
+        if rp_csv:
+            st.markdown(f'- CSV: `{rp_csv.name}`')
+        else:
+            st.error('⚠️ CSV 파일은 필수입니다. 송장번호 매칭에 사용됩니다.')
+
+        st.markdown(f'- 쉽먼트 세트: **{len(rp_pairs)}개**')
+        for sid, m, l in rp_pairs:
+            st.markdown(f'  - `[{sid}]` {m.name} + {l.name}')
+
+        for sid in rp_manifests:
+            if sid not in rp_labels:
+                st.warning(f'쉽먼트 {sid}: 매니페스트만 있고 라벨 없음')
+        for sid in rp_labels:
+            if sid not in rp_manifests:
+                st.warning(f'쉽먼트 {sid}: 라벨만 있고 매니페스트 없음')
+
+        if not rp_csv:
+            st.stop()
+
+        if not rp_pairs:
+            st.error('매칭되는 매니페스트/라벨 세트가 없습니다.')
+        else:
+            st.divider()
+
+            if st.button('🔄 쉽먼트 재출력 시작', type='primary', key='reprint_btn'):
+                rp_progress = st.progress(0)
+                rp_status = st.empty()
+
+                try:
+                    # ===== 1. CSV 파싱 → 송장번호 목록 추출 =====
+                    rp_status.text('📄 CSV 분석 중...')
+                    csv_bytes = rp_csv.read()
+                    rp_items = _parse_csv_bytes(csv_bytes)
+
+                    if not rp_items:
+                        st.error('CSV에서 항목을 찾을 수 없습니다.')
+                        st.stop()
+
+                    # CSV의 송장번호(shipmentNumber) 목록
+                    csv_invoices = set()
+                    rp_grouped = OrderedDict()
+                    for item in rp_items:
+                        inv = item.get('shipmentNumber', '')
+                        if inv:
+                            csv_invoices.add(inv)
+                            rp_grouped.setdefault(inv, []).append(item)
+
+                    for key in rp_grouped:
+                        rp_grouped[key].sort(key=lambda x: (
+                            [int(c) if c.isdigit() else c.lower()
+                             for c in re.split(r'(\d+)', x.get('boxNumber', ''))],
+                            x.get('productName', '')
+                        ))
+
+                    st.info(f'CSV 송장번호: **{len(csv_invoices)}건** 감지')
+                    rp_progress.progress(0.2)
+
+                    # ===== 2. 매니페스트/라벨 분석 =====
+                    rp_status.text('📊 매니페스트/라벨 분석 중...')
+                    rp_manifest_data = {}
+                    rp_label_data = {}
+                    rp_invoice_mapping = {}
+
+                    for sid, mf, lf in rp_pairs:
+                        m_bytes = mf.read(); mf.seek(0)
+                        m_info = _extract_manifest_info(m_bytes)
+                        m_groups = _group_manifest_pages(m_info)
+                        sorted_m = sorted(m_groups, key=lambda g: g['invoice_number'] or '')
+                        rp_manifest_data[sid] = (m_bytes, sorted_m)
+
+                        for g in sorted_m:
+                            if g['invoice_number']:
+                                rp_invoice_mapping[g['invoice_number']] = (sid, g['box_number'])
+
+                        l_bytes = lf.read(); lf.seek(0)
+                        l_info = _extract_label_info(l_bytes)
+                        l_groups = _group_label_pages(l_info)
+                        sorted_l = sorted(l_groups, key=lambda g: g['invoice_number'] or '')
+                        rp_label_data[sid] = (l_bytes, sorted_l)
+
+                    rp_progress.progress(0.4)
+
+                    # ===== 3. 매칭 결과 확인 =====
+                    all_manifest_invoices = set(rp_invoice_mapping.keys())
+                    matched = csv_invoices & all_manifest_invoices
+                    not_in_manifest = csv_invoices - all_manifest_invoices
+                    not_in_csv = all_manifest_invoices - csv_invoices
+
+                    if not matched:
+                        st.error('CSV와 매니페스트 간 매칭되는 송장번호가 없습니다.')
+                        st.stop()
+
+                    col_m1, col_m2, col_m3 = st.columns(3)
+                    with col_m1:
+                        st.metric('매칭됨', f'{len(matched)}건')
+                    with col_m2:
+                        st.metric('CSV에만 존재', f'{len(not_in_manifest)}건')
+                    with col_m3:
+                        st.metric('쉽먼트에만 존재', f'{len(not_in_csv)}건')
+
+                    if not_in_manifest:
+                        with st.expander(f'CSV에만 있는 송장 ({len(not_in_manifest)}건) - 매니페스트 없음'):
+                            st.code('\n'.join(sorted(not_in_manifest)))
+                    if not_in_csv:
+                        with st.expander(f'쉽먼트에만 있는 송장 ({len(not_in_csv)}건) - 이번에 미출력'):
+                            st.code('\n'.join(sorted(not_in_csv)))
+
+                    # ===== 4. 출고지시서 생성 (매칭된 송장만) =====
+                    rp_status.text('📄 출고지시서 생성 중...')
+                    rp_so_by_invoice = {}
+                    all_so_bufs = []
+
+                    for inv_num in sorted(matched):
+                        inv_items = rp_grouped[inv_num]
+                        ship_id, box_num = rp_invoice_mapping.get(inv_num, (None, None))
+                        center = inv_items[0].get('logisticsCenter', '')
+                        gk = f"{center}_{inv_num}" if center else inv_num
+                        pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, box_num)
+                        rp_so_by_invoice[inv_num] = pdf_buf
+                        all_so_bufs.append(pdf_buf)
+
+                    rp_progress.progress(0.6)
+
+                    # ===== 5. 매칭된 송장만 필터링하여 통합 PDF 생성 =====
+                    rp_status.text('📎 통합 PDF 생성 중...')
+                    rp_final_writer = PdfWriter()
+                    rp_total = 0
+                    rp_label_total = 0
+
+                    # 송장별 라벨 그룹 매핑
+                    rp_label_by_inv = {}
+                    for sid, mf, lf in rp_pairs:
+                        l_bytes, sorted_l = rp_label_data[sid]
+                        inv_map = {}
+                        for g in sorted_l:
+                            inv = g['invoice_number'] or ''
+                            if inv in matched:
+                                inv_map.setdefault(inv, []).append(g)
+                        rp_label_by_inv[sid] = inv_map
+
+                    for sid, mf, lf in rp_pairs:
+                        m_bytes, sorted_m = rp_manifest_data[sid]
+                        m_reader = PdfReader(io.BytesIO(m_bytes))
+                        l_bytes, sorted_l = rp_label_data[sid]
+
+                        for g in sorted_m:
+                            inv = g['invoice_number']
+                            if inv not in matched:
+                                continue
+
+                            # 출고지시서
+                            if inv in rp_so_by_invoice:
+                                so_buf = rp_so_by_invoice[inv]
+                                so_buf.seek(0)
+                                so_reader = PdfReader(so_buf)
+                                for page in so_reader.pages:
+                                    rp_final_writer.add_page(page)
+                                rp_total += len(so_reader.pages)
+
+                            # 매니페스트
+                            for pidx in g['page_indices']:
+                                rp_final_writer.add_page(m_reader.pages[pidx])
+                                rp_total += 1
+
+                            # 라벨
+                            inv_key = inv or ''
+                            if inv_key in rp_label_by_inv.get(sid, {}):
+                                inv_label_groups = rp_label_by_inv[sid].pop(inv_key)
+                                four_up = _render_labels_4up(l_bytes, inv_label_groups)
+                                for img in four_up:
+                                    img_buf = io.BytesIO()
+                                    img.save(img_buf, format='PDF', resolution=300)
+                                    img_buf.seek(0)
+                                    lp = PdfReader(img_buf)
+                                    rp_final_writer.add_page(lp.pages[0])
+                                    rp_total += 1
+                                    rp_label_total += 1
+
+                    rp_progress.progress(0.9)
+
+                    rp_final_buf = io.BytesIO()
+                    rp_final_writer.write(rp_final_buf)
+                    rp_final_buf.seek(0)
+
+                    rp_progress.progress(1.0)
+                    rp_status.text('✅ 완료!')
+
+                    # ===== 결과 표시 =====
+                    st.divider()
+                    st.subheader('📋 재출력 결과')
+                    st.markdown(f"""
+| 구분 | 수량 |
+|------|------|
+| 매칭된 송장 | {len(matched)}건 |
+| 출고지시서 + 매니페스트 | {rp_total - rp_label_total}p |
+| 라벨 4분할 | {rp_label_total}p |
+| **전체 합계** | **{rp_total}p** |
+""")
+                    st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
+
+                    st.divider()
+
+                    today = datetime.now().strftime('%Y%m%d_%H%M')
+                    st.download_button(
+                        label=f'⬇️ 재출력 통합 PDF ({rp_total}p)',
+                        data=rp_final_buf,
+                        file_name=f'shipment_reprint_{today}.pdf',
+                        mime='application/pdf',
+                        key='reprint_dl',
+                        type='primary'
+                    )
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
