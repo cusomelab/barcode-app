@@ -152,7 +152,8 @@ def create_large(product_name, barcode_number, material, fix_list):
 
     BAR_W=CANVAS_W-PAD*2
     BAR_H=CANVAS_H-y-50-30-14-fix_h-PAD-16
-    if BAR_H>120: BAR_H=120          if BAR_H<60: BAR_H=60
+    if BAR_H>120: BAR_H=120          
+    if BAR_H<60: BAR_H=60
     img.paste(bc_img.resize((BAR_W,BAR_H),Image.LANCZOS),(PAD,y)); y+=BAR_H+6
 
     font_bc=fit_font(barcode_number,BAR_W,draw)
