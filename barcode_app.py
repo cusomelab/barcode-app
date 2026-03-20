@@ -132,7 +132,7 @@ def fit_font(text, max_w, draw, max_size=42, min_size=8):
 def create_large(product_name, barcode_number, material, fix_list):
     CANVAS_W,CANVAS_H=450,640; PAD=22
     img=Image.new('RGB',(CANVAS_W,CANVAS_H),'white'); draw=ImageDraw.Draw(img)
-    fn=ImageFont.truetype(FONT_PATH,22)
+    fn=ImageFont.truetype(FONT_PATH,33)
     fm=ImageFont.truetype(FONT_PATH,20)
     ff=ImageFont.truetype(FONT_PATH,16)
 
@@ -143,7 +143,7 @@ def create_large(product_name, barcode_number, material, fix_list):
         y+=bb[3]-bb[1]+4
     y+=8
 
-    bc_img=get_barcode_img(barcode_number,write_text=True)
+    bc_img=get_barcode_img(barcode_number,write_text=False)
     fix_h=0
     for txt in fix_list:
         for ln in wrap_text(txt,ff,CANVAS_W-PAD*2,draw):
@@ -152,7 +152,7 @@ def create_large(product_name, barcode_number, material, fix_list):
 
     BAR_W=CANVAS_W-PAD*2
     BAR_H=CANVAS_H-y-50-30-14-fix_h-PAD-16
-    if BAR_H<80: BAR_H=80
+    if BAR_H>120: BAR_H=120          if BAR_H<60: BAR_H=60
     img.paste(bc_img.resize((BAR_W,BAR_H),Image.LANCZOS),(PAD,y)); y+=BAR_H+6
 
     font_bc=fit_font(barcode_number,BAR_W,draw)
