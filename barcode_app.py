@@ -151,15 +151,9 @@ def create_large(product_name, barcode_number, material, fix_list):
         fix_h+=6
 
     BAR_W=CANVAS_W-PAD*2
-    BAR_H=CANVAS_H-y-50-30-14-fix_h-PAD-16
-    if BAR_H>120: BAR_H=120          
+    BAR_H=CANVAS_H-y-30-14-fix_h-PAD
     if BAR_H<60: BAR_H=60
     img.paste(bc_img.resize((BAR_W,BAR_H),Image.LANCZOS),(PAD,y)); y+=BAR_H+6
-
-    font_bc=fit_font(barcode_number,BAR_W,draw)
-    nb=draw.textbbox((0,0),barcode_number,font=font_bc)
-    draw.text(((CANVAS_W-(nb[2]-nb[0]))//2,y),barcode_number,font=font_bc,fill='black')
-    y+=nb[3]-nb[1]+8
 
     if material:
         mt=f'재질 : {material}'; mb=draw.textbbox((0,0),mt,font=fm)
