@@ -964,7 +964,7 @@ with tab5:
     BANNED_KEYWORDS = ['공급가 협의','발주량 협의','가격 인상','단가','시즌 종료','일시적','잠정적']
     REQUIRED_KEYWORDS = ['영구적 생산 중단','영구적 취급 중단','영구적 생산중단','영구적 취급중단']
 
-    col_left, col_right = st.columns([1, 1.5])
+    col_left, col_right = st.columns([1, 3])
 
     with col_left:
         st.subheader('📋 공문 정보 입력')
@@ -1025,8 +1025,12 @@ with tab5:
             if stamp_file:
                 st.image(stamp_file, width=100)
                 stamp_size = st.slider('직인 크기', 50, 200, 80, key='gm_stamp_size')
+                stamp_x = st.slider('직인 좌우 위치 (%)', 0, 100, 58, key='gm_stamp_x')
+                stamp_y = st.slider('직인 상하 위치 (%)', 0, 100, 50, key='gm_stamp_y')
             else:
                 stamp_size = 80
+                stamp_x = 58
+                stamp_y = 50
 
         st.subheader('📊 SKU 목록')
         sku_input_type = st.radio('입력 방식', ['엑셀 파일 업로드', '직접 입력'], horizontal=True, key='gm_sku_type')
@@ -1069,7 +1073,7 @@ with tab5:
         st.subheader('👁️ 미리보기')
 
         # 공문 미리보기 HTML 생성
-        def make_letter_html(company, rep, mgr, contact, docnum, date, reason, skus, stamp_data=None, stamp_sz=80):
+        def make_letter_html(company, rep, mgr, contact, docnum, date, reason, skus, stamp_data=None, stamp_sz=80, stamp_x=58, stamp_y=50):
             date_str = date.strftime('%Y년 %m월 %d일') if hasattr(date, 'strftime') else str(date)
             sku_rows = ''
             for sku in skus:
@@ -1086,7 +1090,7 @@ with tab5:
             if stamp_data:
                 import base64
                 b64 = base64.b64encode(stamp_data).decode()
-                stamp_html = f'<img src="data:image/png;base64,{b64}" style="position:absolute;left:58%;top:50%;transform:translate(-50%,-50%);width:{stamp_sz}px;height:{stamp_sz}px;object-fit:contain;mix-blend-mode:multiply;pointer-events:none"/>'
+                stamp_html = f'<img src="data:image/png;base64,{b64}" style="position:absolute;left:{stamp_x}%;top:{stamp_y}%;transform:translate(-50%,-50%);width:{stamp_sz}px;height:{stamp_sz}px;object-fit:contain;mix-blend-mode:multiply;pointer-events:none"/>'
 
             return f"""
             <div style="background:white;padding:15px;width:100%;box-sizing:border-box;font-family:serif;font-size:9pt;line-height:1.6;color:black">
@@ -1110,14 +1114,14 @@ with tab5:
                     </thead>
                     <tbody>{sku_rows}</tbody>
                 </table>
-                <div style="text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb">
+                <div style="position:relative;text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb">
                     <div style="font-size:13pt;font-weight:bold;margin-bottom:30px;letter-spacing:2px">{date_str}</div>
                     <h1 style="font-size:20pt;font-weight:bold;letter-spacing:6px;margin-bottom:30px">{company or '[업체명]'}</h1>
-                    <div style="position:relative;display:inline-flex;align-items:center;gap:10px">
+                    <div style="display:inline-flex;align-items:center;gap:10px">
                         <span style="font-size:14pt;font-weight:bold;letter-spacing:4px">대표이사&nbsp;&nbsp;{rep or '[성함]'}</span>
                         <span style="font-size:13pt;font-weight:bold">(인)</span>
-                        {stamp_html}
                     </div>
+                    {stamp_html}
                 </div>
             </div>"""
 
@@ -1128,7 +1132,7 @@ with tab5:
         html = make_letter_html(
             company_name, representative, manager_name, manager_contact,
             doc_number, doc_date, reason_detail, sku_list,
-            stamp_data, stamp_size
+            stamp_data, stamp_size, stamp_x, stamp_y
         )
         components_v1.html(html, height=1000, scrolling=True)
 
