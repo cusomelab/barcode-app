@@ -1119,14 +1119,14 @@ with tab5:
                     </thead>
                     <tbody>{sku_rows}</tbody>
                 </table>
-                <div style="text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb">
+                <div style="position:relative;text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid #e5e7eb">
                     <div style="font-size:13pt;font-weight:bold;margin-bottom:30px;letter-spacing:2px">{date_str}</div>
                     <h1 style="font-size:20pt;font-weight:bold;letter-spacing:6px;margin-bottom:30px">{company or '[업체명]'}</h1>
-                    <div style="position:relative;display:inline-flex;align-items:center;gap:10px">
+                    <div style="display:inline-flex;align-items:center;gap:10px">
                         <span style="font-size:14pt;font-weight:bold;letter-spacing:4px">대표이사&nbsp;&nbsp;{rep or '[성함]'}</span>
                         <span style="font-size:13pt;font-weight:bold">(인)</span>
-                        {stamp_html}
                     </div>
+                    {stamp_html}
                 </div>
             </div>"""
 
