@@ -1086,7 +1086,7 @@ with tab5:
                 <tr>
                     <td style="border:1px solid black;padding:6px 8px;text-align:center">{sku['id']}</td>
                     <td style="border:1px solid black;padding:6px 8px">{sku['name']}</td>
-                    <td style="border:1px solid black;padding:6px 8px">{reason}</td>
+                    <td style="border:1px solid black;padding:6px 8px;font-size:7.5pt">{reason}</td>
                 </tr>"""
             if not sku_rows:
                 sku_rows = '<tr><td colspan="3" style="border:1px solid black;padding:20px;text-align:center;color:#999">엑셀 파일을 업로드해 주세요</td></tr>'
@@ -1179,6 +1179,7 @@ with tab5:
                 styles_title  = ParagraphStyle('title',  fontName='NanumBold', fontSize=14, leading=20, alignment=1)
                 styles_center = ParagraphStyle('center', fontName='NanumBold', fontSize=10, leading=16, alignment=1)
                 styles_big    = ParagraphStyle('big',    fontName='NanumBold', fontSize=18, leading=26, alignment=1, spaceAfter=10)
+                styles_small  = ParagraphStyle('small',  fontName='NanumReg', fontSize=8, leading=11)
 
                 date_str = doc_date.strftime('%Y년 %m월 %d일')
                 story = []
@@ -1210,7 +1211,7 @@ with tab5:
                     sku_table_data.append([
                         Paragraph(sku['id'], styles_normal),
                         Paragraph(sku['name'], styles_normal),
-                        Paragraph(reason_detail, styles_normal)
+                        Paragraph(reason_detail, styles_small)
                     ])
 
                 sku_table = Table(sku_table_data, colWidths=[35*mm, 75*mm, 50*mm])
