@@ -969,7 +969,7 @@ with tab5:
     BANNED_KEYWORDS = ['공급가 협의','발주량 협의','가격 인상','단가','시즌 종료','일시적','잠정적']
     REQUIRED_KEYWORDS = ['영구적 생산 중단','영구적 취급 중단','영구적 생산중단','영구적 취급중단']
 
-    col_left, col_right = st.columns([1, 1.5])
+    col_left, col_right = st.columns([1, 2.5])
 
     with col_left:
         st.subheader('📋 공문 정보 입력')
