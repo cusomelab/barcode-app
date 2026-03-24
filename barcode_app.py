@@ -1231,17 +1231,41 @@ with tab5:
                 story.append(Paragraph(company_name, styles_big))
                 story.append(Spacer(1, 10))
 
-                # 직인 이미지 삽입 (대표이사 텍스트 위에 겹쳐서 배치)
+                # 직인 + 대표이사 서명
                 if stamp_data:
-                    from reportlab.platypus import Image as RLImage
-                    from reportlab.lib.units import mm as mm_unit
-                    stamp_buf = io.BytesIO(stamp_data)
+                    from reportlab.platypus import Image as RLImage, Flowable
                     sz = stamp_size * 0.8
-                    stamp_img = RLImage(stamp_buf, width=sz, height=sz)
-                    stamp_img.hAlign = 'CENTER'
-                    story.append(stamp_img)
-                    story.append(Spacer(1, -sz * 0.35))
-                    story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
+
+                    class StampWithText(Flowable):
+                        def __init__(self, stamp_bytes, stamp_sz, rep_name):
+                            Flowable.__init__(self)
+                            self.stamp_bytes = stamp_bytes
+                            self.stamp_sz = stamp_sz
+                            self.rep_name = rep_name
+                            self.width = 160*mm
+                            self.height = stamp_sz + 5
+
+                        def draw(self):
+                            canvas = self.canv
+                            # 텍스트를 중앙에 배치
+                            text = f'대표이사   {self.rep_name}   (인)'
+                            canvas.setFont('NanumBold', 10)
+                            text_w = canvas.stringWidth(text, 'NanumBold', 10)
+                            text_x = self.width / 2 - text_w / 2
+                            text_y = 5
+                            canvas.drawString(text_x, text_y, text)
+                            # 도장을 이름 왼쪽에 겹치도록 배치
+                            from reportlab.lib.utils import ImageReader
+                            stamp_reader = ImageReader(io.BytesIO(self.stamp_bytes))
+                            stamp_x = text_x - self.stamp_sz * 0.15
+                            stamp_y = text_y - self.stamp_sz * 0.35
+                            canvas.drawImage(stamp_reader, stamp_x, stamp_y,
+                                           width=self.stamp_sz, height=self.stamp_sz,
+                                           preserveAspectRatio=True, mask='auto')
+
+                    stamp_flow = StampWithText(stamp_data, sz, representative)
+                    stamp_flow.hAlign = 'CENTER'
+                    story.append(stamp_flow)
                 else:
                     story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
 
