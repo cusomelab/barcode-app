@@ -505,6 +505,9 @@ def merge_pdfs(pdf_buffers):
 # Streamlit UI
 # ══════════════════════════════════════════════════════
 st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
+st.markdown("""<style>
+    .block-container { max-width: 58rem !important; }
+</style>""", unsafe_allow_html=True)
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
@@ -964,7 +967,7 @@ with tab5:
     BANNED_KEYWORDS = ['공급가 협의','발주량 협의','가격 인상','단가','시즌 종료','일시적','잠정적']
     REQUIRED_KEYWORDS = ['영구적 생산 중단','영구적 취급 중단','영구적 생산중단','영구적 취급중단']
 
-    col_left, col_right = st.columns([1, 3])
+    col_left, col_right = st.columns([2, 3])
 
     with col_left:
         st.subheader('📋 공문 정보 입력')
@@ -1081,7 +1084,7 @@ with tab5:
                 <tr>
                     <td style="border:1px solid black;padding:6px 8px;text-align:center">{sku['id']}</td>
                     <td style="border:1px solid black;padding:6px 8px">{sku['name']}</td>
-                    <td style="border:1px solid black;padding:6px 8px;text-align:center">{reason[:30] + '...' if len(reason) > 30 else reason}</td>
+                    <td style="border:1px solid black;padding:6px 8px;font-size:7.5pt">{reason}</td>
                 </tr>"""
             if not sku_rows:
                 sku_rows = '<tr><td colspan="3" style="border:1px solid black;padding:20px;text-align:center;color:#999">엑셀 파일을 업로드해 주세요</td></tr>'
@@ -1174,6 +1177,7 @@ with tab5:
                 styles_title  = ParagraphStyle('title',  fontName='NanumBold', fontSize=14, leading=20, alignment=1)
                 styles_center = ParagraphStyle('center', fontName='NanumBold', fontSize=10, leading=16, alignment=1)
                 styles_big    = ParagraphStyle('big',    fontName='NanumBold', fontSize=18, leading=26, alignment=1, spaceAfter=10)
+                styles_small  = ParagraphStyle('small',  fontName='NanumReg', fontSize=8, leading=11)
 
                 date_str = doc_date.strftime('%Y년 %m월 %d일')
                 story = []
@@ -1205,7 +1209,7 @@ with tab5:
                     sku_table_data.append([
                         Paragraph(sku['id'], styles_normal),
                         Paragraph(sku['name'], styles_normal),
-                        Paragraph(reason_detail[:50] + ('...' if len(reason_detail) > 50 else ''), styles_normal)
+                        Paragraph(reason_detail, styles_small)
                     ])
 
                 sku_table = Table(sku_table_data, colWidths=[35*mm, 75*mm, 50*mm])
@@ -1227,6 +1231,15 @@ with tab5:
                 story.append(Paragraph(company_name, styles_big))
                 story.append(Spacer(1, 10))
                 story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
+
+                # 직인 이미지 삽입
+                if stamp_data:
+                    from reportlab.platypus import Image as RLImage
+                    stamp_buf = io.BytesIO(stamp_data)
+                    stamp_img = RLImage(stamp_buf, width=stamp_size * 0.8, height=stamp_size * 0.8)
+                    stamp_img.hAlign = 'CENTER'
+                    story.append(Spacer(1, -stamp_size * 0.6))
+                    story.append(stamp_img)
 
                 doc.build(story)
                 buf.seek(0)
