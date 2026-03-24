@@ -1235,16 +1235,20 @@ with tab5:
                 story.append(Spacer(1, 20))
                 story.append(Paragraph(company_name, styles_big))
                 story.append(Spacer(1, 10))
-                story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
 
-                # 직인 이미지 삽입
+                # 직인 이미지 삽입 (대표이사 텍스트 위에 겹쳐서 배치)
                 if stamp_data:
                     from reportlab.platypus import Image as RLImage
+                    from reportlab.lib.units import mm as mm_unit
                     stamp_buf = io.BytesIO(stamp_data)
-                    stamp_img = RLImage(stamp_buf, width=stamp_size * 0.8, height=stamp_size * 0.8)
+                    sz = stamp_size * 0.8
+                    stamp_img = RLImage(stamp_buf, width=sz, height=sz)
                     stamp_img.hAlign = 'CENTER'
-                    story.append(Spacer(1, -stamp_size * 0.6))
                     story.append(stamp_img)
+                    story.append(Spacer(1, -sz * 0.35))
+                    story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
+                else:
+                    story.append(Paragraph(f'대표이사&nbsp;&nbsp;&nbsp;{representative}&nbsp;&nbsp;&nbsp;(인)', styles_center))
 
                 doc.build(story)
                 buf.seek(0)
