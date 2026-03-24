@@ -510,6 +510,9 @@ def merge_pdfs(pdf_buffers):
 # Streamlit UI
 # ══════════════════════════════════════════════════════
 st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
+st.markdown("""<style>
+    .block-container { max-width: 58rem !important; }
+</style>""", unsafe_allow_html=True)
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
