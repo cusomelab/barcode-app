@@ -6,6 +6,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 import streamlit as st
 import streamlit.components.v1 as components_v1
+import time
 from PIL import Image, ImageDraw, ImageFont
 import barcode
 from barcode.writer import ImageWriter
@@ -507,11 +508,321 @@ def merge_pdfs(pdf_buffers):
 st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
 st.markdown("""<style>
     .block-container { max-width: 58rem !important; }
+    /* 피킹 스캔 결과 피드백 */
+    .scan-ok {
+        background: #d4edda; border-left: 6px solid #28a745;
+        padding: 1.2rem 1.5rem; border-radius: 8px; margin: 0.5rem 0; color: #155724;
+    }
+    .scan-error {
+        background: #f8d7da; border-left: 6px solid #dc3545;
+        padding: 1.2rem 1.5rem; border-radius: 8px; margin: 0.5rem 0; color: #721c24;
+        animation: shake 0.5s ease-in-out;
+    }
+    .scan-warning {
+        background: #fff3cd; border-left: 6px solid #ffc107;
+        padding: 1.2rem 1.5rem; border-radius: 8px; margin: 0.5rem 0; color: #856404;
+    }
+    .scan-complete {
+        background: #cce5ff; border-left: 6px solid #007bff;
+        padding: 1.2rem 1.5rem; border-radius: 8px; margin: 0.5rem 0; color: #004085;
+    }
+    .scan-shortage {
+        background: #e2e3f1; border-left: 6px solid #6c63ff;
+        padding: 1.2rem 1.5rem; border-radius: 8px; margin: 0.5rem 0; color: #383467;
+    }
+    @keyframes shake {
+        0%, 100% { transform: translateX(0); }
+        20% { transform: translateX(-10px); }
+        40% { transform: translateX(10px); }
+        60% { transform: translateX(-6px); }
+        80% { transform: translateX(6px); }
+    }
+    .shipment-input {
+        background: #f0f2f6; padding: 2rem; border-radius: 12px; text-align: center;
+    }
 </style>""", unsafe_allow_html=True)
 st.title('🚀 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력'])
+# ══════════════════════════════════════════════════════
+# 피킹 검증 시스템 — 헬퍼 함수 & 설정
+# ══════════════════════════════════════════════════════
+PICKING_CONFIG = {
+    "SERVICE_ACCOUNT_FILE": "service_account.json",
+    "SPREADSHEET_ID": "여기에_스프레드시트_ID_입력",
+    "SHEET_출고지시서": "출고지시서",
+    "SHEET_배대지입고": "배대지입고리스트",
+    "SHEET_피킹로그": "피킹로그",
+}
+
+@st.cache_resource(ttl=600)
+def get_gsheet_client():
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_file(
+            PICKING_CONFIG["SERVICE_ACCOUNT_FILE"], scopes=scopes
+        )
+        return gspread.authorize(creds)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        st.warning(f"구글 시트 연결 실패: {e}")
+        return None
+
+def pick_load_sheet_as_df(client, sheet_name):
+    try:
+        import pandas as _pd
+        spreadsheet = client.open_by_key(PICKING_CONFIG["SPREADSHEET_ID"])
+        worksheet = spreadsheet.worksheet(sheet_name)
+        data = worksheet.get_all_records()
+        if not data:
+            return _pd.DataFrame()
+        return _pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"시트 '{sheet_name}' 로드 실패: {e}")
+        return None
+
+def pick_append_log(client, log_entry):
+    try:
+        spreadsheet = client.open_by_key(PICKING_CONFIG["SPREADSHEET_ID"])
+        try:
+            ws = spreadsheet.worksheet(PICKING_CONFIG["SHEET_피킹로그"])
+        except Exception:
+            ws = spreadsheet.add_worksheet(title=PICKING_CONFIG["SHEET_피킹로그"], rows=1000, cols=10)
+            ws.append_row(["시간","송장번호","바코드","상품명","결과","스캔수량","필요수량","회차기호","박스번호"])
+        ws.append_row(log_entry)
+        return True
+    except Exception:
+        return False
+
+def pick_parse_box(box_str):
+    import pandas as _pd
+    if _pd.isna(box_str) or str(box_str).strip() == "":
+        return {"기호": None, "박스": None, "수량": None, "상태": "알수없음"}
+    box_str = str(box_str).strip()
+    match = re.match(r"((?:국내)?부족)\((-?\d+)\)", box_str)
+    if match:
+        return {"기호": match.group(1), "박스": None, "수량": int(match.group(2)), "상태": "부족"}
+    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)(\d+)\((\d+)\)", box_str)
+    if match:
+        return {"기호": match.group(1), "박스": match.group(2), "수량": int(match.group(3)), "상태": "피킹가능"}
+    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)(\d+)", box_str)
+    if match:
+        return {"기호": match.group(1), "박스": match.group(2), "수량": None, "상태": "피킹가능"}
+    match = re.match(r"(국내재고)\((\d+)\)", box_str)
+    if match:
+        return {"기호": match.group(1), "박스": None, "수량": int(match.group(2)), "상태": "피킹가능"}
+    if box_str == "국내재고":
+        return {"기호": "국내재고", "박스": None, "수량": None, "상태": "피킹가능"}
+    return {"기호": box_str, "박스": None, "수량": None, "상태": "알수없음"}
+
+def pick_clean_출고(df):
+    import pandas as _pd
+    df = df.copy()
+    required = ["바코드", "상품명", "수량", "쉽먼트운송장번호"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"출고지시서 필수 컬럼 누락: {missing}")
+        return None
+    df["수량"] = _pd.to_numeric(df["수량"], errors="coerce").fillna(0).astype(int)
+    df["쉽먼트운송장번호"] = df["쉽먼트운송장번호"].astype(str).str.replace(r"\.0$", "", regex=True)
+    df["바코드"] = df["바코드"].astype(str).str.strip()
+    if "박스번호" in df.columns:
+        parsed = df["박스번호"].apply(pick_parse_box)
+        df["회차기호"] = parsed.apply(lambda x: x["기호"])
+        df["박스넘버"] = parsed.apply(lambda x: x["박스"])
+        df["박스내수량"] = parsed.apply(lambda x: x["수량"])
+        df["피킹상태"] = parsed.apply(lambda x: x["상태"])
+    return df
+
+def pick_clean_배대지(df):
+    import pandas as _pd
+    df = df.copy()
+    if "바코드" not in df.columns:
+        st.error("배대지 시트에 '바코드' 컬럼이 없습니다")
+        return None
+    df["바코드"] = df["바코드"].astype(str).str.strip()
+    if "수량" in df.columns:
+        df["수량"] = _pd.to_numeric(df["수량"], errors="coerce").fillna(0).astype(int)
+    if "배대지주문수량" in df.columns:
+        df["배대지주문수량"] = _pd.to_numeric(df["배대지주문수량"], errors="coerce").fillna(0).astype(int)
+    if "박스번호" in df.columns:
+        parsed = df["박스번호"].apply(pick_parse_box)
+        df["회차기호"] = parsed.apply(lambda x: x["기호"])
+        df["박스넘버"] = parsed.apply(lambda x: x["박스"])
+    return df
+
+def pick_init_session():
+    defaults = {
+        "pick_df_출고": None, "pick_df_배대지": None,
+        "pick_selected_shipment": None, "pick_picking_state": {},
+        "pick_inventory_state": {}, "pick_scan_log": [],
+        "pick_last_scan_result": None, "pick_scan_counter": 0,
+        "pick_completed_shipments": set(), "pick_shortage_items": [],
+        "pick_data_loaded": False, "pick_gsheet_client": None,
+        "pick_use_gsheet": False,
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+pick_init_session()
+
+def pick_load_all_data():
+    import pandas as _pd
+    client = get_gsheet_client()
+    if client:
+        st.session_state.pick_gsheet_client = client
+        st.session_state.pick_use_gsheet = True
+        df_출고 = pick_load_sheet_as_df(client, PICKING_CONFIG["SHEET_출고지시서"])
+        if df_출고 is not None and not df_출고.empty:
+            st.session_state.pick_df_출고 = pick_clean_출고(df_출고)
+        df_배대지 = pick_load_sheet_as_df(client, PICKING_CONFIG["SHEET_배대지입고"])
+        if df_배대지 is not None and not df_배대지.empty:
+            st.session_state.pick_df_배대지 = pick_clean_배대지(df_배대지)
+        if st.session_state.pick_df_출고 is not None:
+            st.session_state.pick_data_loaded = True
+            return True
+    return False
+
+def pick_init_inventory():
+    df = st.session_state.pick_df_배대지
+    if df is None or df.empty:
+        return
+    inventory = {}
+    for _, row in df.iterrows():
+        barcode = row["바코드"]
+        symbol = row.get("회차기호", "기타")
+        qty = row.get("수량", 0)
+        key = (symbol, barcode)
+        inventory[key] = inventory.get(key, 0) + qty
+    st.session_state.pick_inventory_state = inventory
+
+def pick_init_picking(shipment_id):
+    df = st.session_state.pick_df_출고
+    shipment_df = df[df["쉽먼트운송장번호"] == shipment_id]
+    if shipment_df.empty:
+        st.error(f"쉽먼트 {shipment_id}를 찾을 수 없습니다")
+        return
+    picking = {}
+    shortage_items = []
+    for _, row in shipment_df.iterrows():
+        bc = row["바코드"]
+        symbol = row.get("회차기호", "")
+        qty = row["수량"]
+        pick_status = row.get("피킹상태", "피킹가능")
+        if pick_status == "부족":
+            shortage_items.append({
+                "바코드": bc, "상품명": row["상품명"],
+                "부족수량": abs(row.get("박스내수량", 0) or 0),
+                "박스번호": row.get("박스번호", ""),
+            })
+            continue
+        if bc in picking:
+            picking[bc]["필요수량"] += qty
+        else:
+            inv_key = (symbol, bc)
+            inv_qty = st.session_state.pick_inventory_state.get(inv_key, None)
+            picking[bc] = {
+                "상품명": row["상품명"], "필요수량": qty, "스캔수량": 0,
+                "회차기호": symbol if symbol else "N/A",
+                "박스번호": row.get("박스번호", ""), "박스넘버": row.get("박스넘버", ""),
+                "박스내수량": row.get("박스내수량", None), "배대지잔여": inv_qty,
+                "SKU_ID": row.get("SKU ID", ""), "물류센터": row.get("물류센터(FC)", ""),
+            }
+    st.session_state.pick_picking_state = picking
+    st.session_state.pick_shortage_items = shortage_items
+    st.session_state.pick_selected_shipment = shipment_id
+    st.session_state.pick_scan_log = []
+    st.session_state.pick_last_scan_result = None
+    st.session_state.pick_scan_counter = 0
+
+def pick_process_scan(barcode):
+    barcode = barcode.strip()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state = st.session_state.pick_picking_state
+    inventory = st.session_state.pick_inventory_state
+
+    if barcode not in state:
+        df = st.session_state.pick_df_출고
+        hint = ""
+        if df is not None:
+            match = df[df["바코드"] == barcode]
+            if not match.empty:
+                name = match["상품명"].iloc[0][:25]
+                others = match["쉽먼트운송장번호"].unique()[:3]
+                hint = f" → [{name}] 다른 쉽먼트에 있음: {', '.join(s[-6:] for s in others)}"
+            else:
+                hint = " → 출고지시서에 없는 바코드"
+        result = {"status": "error", "message": "🚨 오피킹! 이 쉽먼트에 없는 바코드",
+                  "detail": f"{barcode}{hint}", "barcode": barcode, "상품명": "", "시간": now}
+        st.session_state.pick_scan_log.append(result)
+        st.session_state.pick_last_scan_result = result
+        st.session_state.pick_scan_counter += 1
+        return result
+
+    item = state[barcode]
+    item["스캔수량"] += 1
+
+    if item["스캔수량"] > item["필요수량"]:
+        result = {"status": "over", "message": f"⚠️ 수량 초과! {item['상품명'][:35]}",
+                  "detail": f"필요 {item['필요수량']}개인데 {item['스캔수량']}번째 스캔",
+                  "barcode": barcode, "상품명": item["상품명"], "시간": now}
+        st.session_state.pick_scan_log.append(result)
+        st.session_state.pick_last_scan_result = result
+        st.session_state.pick_scan_counter += 1
+        return result
+
+    symbol = item["회차기호"]
+    inv_key = (symbol, barcode)
+    shortage_warning = ""
+    if inv_key in inventory:
+        if inventory[inv_key] > 0:
+            inventory[inv_key] -= 1
+            item["배대지잔여"] = inventory[inv_key]
+        else:
+            shortage_warning = f" | ⚠ {symbol}회차 배대지 재고 소진!"
+            item["배대지잔여"] = 0
+
+    remaining = item["필요수량"] - item["스캔수량"]
+    result = {
+        "status": "ok" if not shortage_warning else "shortage",
+        "message": f"✅ {item['상품명'][:35]}",
+        "detail": f"스캔 {item['스캔수량']}/{item['필요수량']} (남은: {remaining}){shortage_warning}",
+        "barcode": barcode, "상품명": item["상품명"], "시간": now,
+    }
+    st.session_state.pick_scan_log.append(result)
+    st.session_state.pick_last_scan_result = result
+    st.session_state.pick_scan_counter += 1
+
+    if st.session_state.pick_use_gsheet and st.session_state.pick_gsheet_client:
+        log_row = [now, st.session_state.pick_selected_shipment or "", barcode,
+                   item["상품명"][:40], result["status"], item["스캔수량"],
+                   item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
+        pick_append_log(st.session_state.pick_gsheet_client, log_row)
+    return result
+
+def pick_get_progress():
+    state = st.session_state.pick_picking_state
+    if not state:
+        return {"total":0,"scanned":0,"skus":0,"done_skus":0,"pct":0.0,"is_complete":False,"over":0,"shortage":0}
+    total = sum(v["필요수량"] for v in state.values())
+    scanned = sum(min(v["스캔수량"], v["필요수량"]) for v in state.values())
+    over = sum(max(0, v["스캔수량"] - v["필요수량"]) for v in state.values())
+    skus = len(state)
+    done_skus = sum(1 for v in state.values() if v["스캔수량"] >= v["필요수량"])
+    shortage = sum(1 for v in state.values()
+                   if v.get("배대지잔여") is not None and v["배대지잔여"] == 0 and v["스캔수량"] < v["필요수량"])
+    pct = scanned / total if total > 0 else 0
+    return {"total":total,"scanned":scanned,"skus":skus,"done_skus":done_skus,
+            "pct":pct,"is_complete":scanned>=total,"over":over,"shortage":shortage}
+
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 검증'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -1988,3 +2299,210 @@ with tab7:
                     st.error(f'❌ 오류 발생: {e}')
                     import traceback
                     st.code(traceback.format_exc())
+
+# ══════════════════════════════════════════════════════
+# 탭8: 피킹 검증 시스템
+# ══════════════════════════════════════════════════════
+with tab8:
+    import pandas as _pd
+
+    st.header('📦 피킹 검증 시스템')
+    st.caption('바코드 스캔 → 출고지시서 검증 + 배대지 재고 동시 차감')
+
+    # ── 데이터 소스 선택 ──
+    pick_mode = st.radio(
+        "데이터 소스",
+        ["📊 구글 시트 (실시간)", "📂 CSV 파일 업로드"],
+        index=0, key="pick_mode", horizontal=True,
+    )
+
+    if pick_mode == "📊 구글 시트 (실시간)":
+        if st.button("🔄 구글 시트 연결", use_container_width=True, key="pick_gsheet_btn"):
+            with st.spinner("구글 시트 연결 중..."):
+                success = pick_load_all_data()
+                if success:
+                    pick_init_inventory()
+                    st.success("✅ 구글 시트 연결 완료!")
+                    st.rerun()
+                else:
+                    st.error("연결 실패 — CSV 모드를 사용하세요")
+    else:
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            pick_csv_출고 = st.file_uploader("출고지시서 CSV", type=["csv"], key="pick_csv_출고")
+        with pc2:
+            pick_csv_배대지 = st.file_uploader("배대지 입고 CSV (선택)", type=["csv"], key="pick_csv_배대지")
+        if pick_csv_출고:
+            df = _pd.read_csv(pick_csv_출고, encoding="utf-8-sig")
+            st.session_state.pick_df_출고 = pick_clean_출고(df)
+            if st.session_state.pick_df_출고 is not None:
+                st.session_state.pick_data_loaded = True
+        if pick_csv_배대지:
+            df = _pd.read_csv(pick_csv_배대지, encoding="utf-8-sig")
+            st.session_state.pick_df_배대지 = pick_clean_배대지(df)
+            if st.session_state.pick_data_loaded and st.session_state.pick_df_배대지 is not None:
+                pick_init_inventory()
+
+    # ── 데이터 상태 표시 ──
+    if st.session_state.pick_df_출고 is not None:
+        n_rows = len(st.session_state.pick_df_출고)
+        n_ship = st.session_state.pick_df_출고["쉽먼트운송장번호"].nunique()
+        st.success(f"출고지시서: {n_rows}행 / {n_ship}개 쉽먼트")
+    if st.session_state.pick_df_배대지 is not None:
+        st.success(f"배대지 입고: {len(st.session_state.pick_df_배대지)}행 로드됨")
+
+    # ── 데이터 없으면 가이드 ──
+    if not st.session_state.pick_data_loaded:
+        st.info("위에서 데이터를 연결하세요 (구글 시트 또는 CSV)")
+        st.markdown("""
+**초기 설정 방법 (구글 시트 모드):**
+1. `service_account.json` 파일을 앱 폴더에 배치
+2. 구글 스프레드시트에 서비스 계정 이메일을 **편집자**로 공유
+3. `barcode_app.py` 상단의 `PICKING_CONFIG`에서 스프레드시트 ID와 시트 탭 이름 설정
+4. '구글 시트 연결' 클릭
+
+**또는 CSV 모드:**
+1. 'CSV 파일 업로드' 선택
+2. 출고지시서 CSV 업로드 (필수)
+3. 배대지 입고 CSV 업로드 (선택)
+        """)
+    elif not st.session_state.pick_selected_shipment:
+        # ── 송장번호 선택 ──
+        st.markdown('<div class="shipment-input">', unsafe_allow_html=True)
+        st.markdown("### 📋 쉽먼트 선택")
+
+        p_col1, p_col2 = st.columns([2, 1])
+        with p_col1:
+            input_shipment = st.text_input("송장번호 직접 입력", placeholder="운송장번호 입력 후 Enter", key="pick_shipment_input")
+        with p_col2:
+            pick_df = st.session_state.pick_df_출고
+            centers = ["전체"] + sorted(pick_df["물류센터(FC)"].unique().tolist()) if "물류센터(FC)" in pick_df.columns else ["전체"]
+            center = st.selectbox("물류센터", centers, key="pick_center_filter")
+
+        pick_df = st.session_state.pick_df_출고
+        if center != "전체" and "물류센터(FC)" in pick_df.columns:
+            filtered = pick_df[pick_df["물류센터(FC)"] == center]
+        else:
+            filtered = pick_df
+
+        summary = filtered.groupby("쉽먼트운송장번호").agg(
+            SKU수=("바코드", "nunique"), 총수량=("수량", "sum"),
+        ).reset_index().sort_values("총수량", ascending=False)
+
+        selected_shipment = st.selectbox(
+            "또는 목록에서 선택",
+            options=summary["쉽먼트운송장번호"].tolist(),
+            format_func=lambda x: (
+                f"{'✅ ' if x in st.session_state.pick_completed_shipments else ''}"
+                f"{x[-6:]} | "
+                f"{summary[summary['쉽먼트운송장번호']==x]['SKU수'].values[0]}종 "
+                f"{summary[summary['쉽먼트운송장번호']==x]['총수량'].values[0]}개"
+            ),
+            key="pick_shipment_select",
+        )
+
+        target = input_shipment.strip() if input_shipment else selected_shipment
+
+        if st.button("🚀 피킹 시작", type="primary", use_container_width=True, key="pick_start_btn"):
+            if target:
+                valid_ids = pick_df["쉽먼트운송장번호"].unique()
+                if target in valid_ids:
+                    pick_init_picking(target)
+                    st.rerun()
+                else:
+                    matches = [s for s in valid_ids if s.endswith(target)]
+                    if len(matches) == 1:
+                        pick_init_picking(matches[0])
+                        st.rerun()
+                    elif len(matches) > 1:
+                        st.warning(f"'{target}'에 매칭되는 쉽먼트가 {len(matches)}개입니다.")
+                    else:
+                        st.error(f"'{target}'에 해당하는 쉽먼트를 찾을 수 없습니다.")
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        # ── 피킹 진행 화면 ──
+        progress = pick_get_progress()
+        shipment_id = st.session_state.pick_selected_shipment
+
+        hcol1, hcol2 = st.columns([4, 1])
+        with hcol1:
+            item0 = list(st.session_state.pick_picking_state.values())[0] if st.session_state.pick_picking_state else {}
+            st.markdown(f"**쉽먼트:** `{shipment_id}` | **센터:** {item0.get('물류센터','')} | **회차:** {item0.get('회차기호','')}")
+        with hcol2:
+            if st.button("🔄 다른 쉽먼트", use_container_width=True, key="pick_change_btn"):
+                st.session_state.pick_selected_shipment = None
+                st.rerun()
+
+        pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+        pc1.metric("스캔", f"{progress['scanned']}/{progress['total']}")
+        pc2.metric("SKU 완료", f"{progress['done_skus']}/{progress['skus']}")
+        pc3.metric("진행률", f"{progress['pct']:.0%}")
+        pc4.metric("초과 스캔", f"{progress['over']}건",
+                   delta=f"+{progress['over']}" if progress['over'] > 0 else None, delta_color="inverse")
+        pc5.metric("재고 부족", f"{progress['shortage']}건",
+                   delta=f"{progress['shortage']}" if progress['shortage'] > 0 else None, delta_color="inverse")
+        st.progress(progress["pct"])
+
+        if progress["is_complete"]:
+            st.markdown(
+                f'<div class="scan-complete"><strong style="font-size:1.3rem;">🎉 피킹 완료!</strong><br>'
+                f'쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</div>',
+                unsafe_allow_html=True)
+            st.session_state.pick_completed_shipments.add(shipment_id)
+
+        st.markdown("---")
+        scan_key = f"pick_scan_{st.session_state.pick_scan_counter}"
+        scanned = st.text_input("🔫 바코드 스캔 (스캐너 또는 직접 입력)", key=scan_key,
+                                placeholder="스캐너 대기 중... 바코드를 스캔하세요")
+        if scanned:
+            pick_process_scan(scanned)
+            st.rerun()
+
+        r = st.session_state.pick_last_scan_result
+        if r:
+            css_class = {"ok":"scan-ok","over":"scan-warning","error":"scan-error","shortage":"scan-shortage"}.get(r["status"],"scan-ok")
+            st.markdown(
+                f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
+                unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.subheader("📋 피킹 현황")
+        rows = []
+        for bc, info in st.session_state.pick_picking_state.items():
+            s, n = info["스캔수량"], info["필요수량"]
+            if s > n: status_txt = f"⚠️ 초과 ({s}/{n})"
+            elif s >= n: status_txt = "✅ 완료"
+            elif s > 0: status_txt = f"🔄 {s}/{n}"
+            else: status_txt = "⬜ 대기"
+            inv = info.get("배대지잔여")
+            rows.append({
+                "상태": status_txt, "바코드": bc,
+                "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
+                "필요": n, "스캔": s, "남은": max(0, n - s),
+                "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
+                "배대지재고": f"{inv}" if inv is not None else "-",
+            })
+        pick_order = {"🔄":0,"⬜":1,"✅":2,"⚠️":3}
+        rows.sort(key=lambda x: pick_order.get(x["상태"][0], 9))
+        st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                     height=min(500, len(rows) * 38 + 40))
+
+        shortage = st.session_state.get("pick_shortage_items", [])
+        if shortage:
+            with st.expander(f"⛔ 부족분 — 피킹 불가 ({len(shortage)}건)", expanded=False):
+                st.caption("출고지시서에 '부족'으로 표시된 항목입니다.")
+                st.dataframe(_pd.DataFrame(shortage), use_container_width=True, hide_index=True)
+
+        if st.session_state.pick_scan_log:
+            with st.expander(f"📜 스캔 로그 ({len(st.session_state.pick_scan_log)}건)"):
+                log_display = []
+                for entry in reversed(st.session_state.pick_scan_log[-50:]):
+                    icon = {"ok":"✅","over":"⚠️","error":"🚨","shortage":"📦"}.get(entry["status"],"?")
+                    log_display.append({"시간":entry["시간"],"결과":icon,"바코드":entry["barcode"],"내용":entry["message"]})
+                st.dataframe(_pd.DataFrame(log_display), use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "📥 스캔 로그 CSV",
+                data=_pd.DataFrame(st.session_state.pick_scan_log).to_csv(index=False, encoding="utf-8-sig"),
+                file_name=f"picking_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv", use_container_width=True, key="pick_log_dl")
