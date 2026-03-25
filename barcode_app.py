@@ -549,7 +549,7 @@ st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로
 # ══════════════════════════════════════════════════════
 PICKING_CONFIG = {
     "SERVICE_ACCOUNT_FILE": "service_account.json",
-    "SPREADSHEET_ID": "여기에_스프레드시트_ID_입력",
+    "SPREADSHEET_ID": "1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc",
     "SHEET_출고지시서": "출고지시서",
     "SHEET_배대지입고": "배대지입고리스트",
     "SHEET_피킹로그": "피킹로그",
