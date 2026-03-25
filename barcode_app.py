@@ -549,11 +549,14 @@ st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로
 # ══════════════════════════════════════════════════════
 PICKING_CONFIG = {
     "SERVICE_ACCOUNT_FILE": "service_account.json",
-    "SPREADSHEET_ID": "1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc",
-    "SHEET_출고지시서": "출고지시서",
-    "SHEET_배대지입고": "배대지입고리스트",
-    "SHEET_피킹로그": "피킹로그",
 }
+
+def _extract_sheet_id(url_or_id):
+    """구글 시트 URL 또는 ID에서 스프레드시트 ID만 추출"""
+    m = re.search(r'/d/([a-zA-Z0-9_-]+)', url_or_id)
+    if m:
+        return m.group(1)
+    return url_or_id.strip()
 
 @st.cache_resource(ttl=600)
 def get_gsheet_client():
@@ -581,26 +584,44 @@ def get_gsheet_client():
         st.warning(f"구글 시트 연결 실패: {e}")
         return None
 
-def pick_load_sheet_as_df(client, sheet_name):
+def pick_load_sheet_as_df(client, sheet_url, tab_name):
     try:
         import pandas as _pd
-        spreadsheet = client.open_by_key(PICKING_CONFIG["SPREADSHEET_ID"])
-        worksheet = spreadsheet.worksheet(sheet_name)
-        data = worksheet.get_all_records()
-        if not data:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        worksheet = spreadsheet.worksheet(tab_name)
+        # 중복 헤더 대응: get_all_values로 읽고 직접 DataFrame 생성
+        all_values = worksheet.get_all_values()
+        if len(all_values) < 2:
             return _pd.DataFrame()
-        return _pd.DataFrame(data)
+        headers = all_values[0]
+        # 중복 컬럼명 처리: 같은 이름이면 _2, _3 붙임
+        seen = {}
+        unique_headers = []
+        for h in headers:
+            h = str(h).strip()
+            if h == '':
+                h = f'_unnamed_{len(unique_headers)}'
+            if h in seen:
+                seen[h] += 1
+                unique_headers.append(f"{h}_{seen[h]}")
+            else:
+                seen[h] = 1
+                unique_headers.append(h)
+        df = _pd.DataFrame(all_values[1:], columns=unique_headers)
+        return df
     except Exception as e:
-        st.error(f"시트 '{sheet_name}' 로드 실패: {e}")
+        st.error(f"시트 '{tab_name}' 로드 실패: {e}")
         return None
 
-def pick_append_log(client, log_entry):
+def pick_append_log(client, sheet_url, log_entry):
     try:
-        spreadsheet = client.open_by_key(PICKING_CONFIG["SPREADSHEET_ID"])
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
         try:
-            ws = spreadsheet.worksheet(PICKING_CONFIG["SHEET_피킹로그"])
+            ws = spreadsheet.worksheet("피킹로그")
         except Exception:
-            ws = spreadsheet.add_worksheet(title=PICKING_CONFIG["SHEET_피킹로그"], rows=1000, cols=10)
+            ws = spreadsheet.add_worksheet(title="피킹로그", rows=1000, cols=10)
             ws.append_row(["시간","송장번호","바코드","상품명","결과","스캔수량","필요수량","회차기호","박스번호"])
         ws.append_row(log_entry)
         return True
@@ -673,6 +694,8 @@ def pick_init_session():
         "pick_completed_shipments": set(), "pick_shortage_items": [],
         "pick_data_loaded": False, "pick_gsheet_client": None,
         "pick_use_gsheet": False,
+        "pick_sheet_url_출고": "", "pick_sheet_tab_출고": "",
+        "pick_sheet_url_배대지": "", "pick_sheet_tab_배대지": "",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -680,18 +703,26 @@ def pick_init_session():
 
 pick_init_session()
 
-def pick_load_all_data():
+def pick_load_all_data(url_출고, tab_출고, url_배대지="", tab_배대지=""):
     import pandas as _pd
     client = get_gsheet_client()
     if client:
         st.session_state.pick_gsheet_client = client
         st.session_state.pick_use_gsheet = True
-        df_출고 = pick_load_sheet_as_df(client, PICKING_CONFIG["SHEET_출고지시서"])
-        if df_출고 is not None and not df_출고.empty:
-            st.session_state.pick_df_출고 = pick_clean_출고(df_출고)
-        df_배대지 = pick_load_sheet_as_df(client, PICKING_CONFIG["SHEET_배대지입고"])
-        if df_배대지 is not None and not df_배대지.empty:
-            st.session_state.pick_df_배대지 = pick_clean_배대지(df_배대지)
+        # 출고지시서(쉽먼트시트) 로드
+        if url_출고 and tab_출고:
+            df_출고 = pick_load_sheet_as_df(client, url_출고, tab_출고)
+            if df_출고 is not None and not df_출고.empty:
+                st.session_state.pick_df_출고 = pick_clean_출고(df_출고)
+                st.session_state.pick_sheet_url_출고 = url_출고
+                st.session_state.pick_sheet_tab_출고 = tab_출고
+        # 배대지 입고 로드
+        if url_배대지 and tab_배대지:
+            df_배대지 = pick_load_sheet_as_df(client, url_배대지, tab_배대지)
+            if df_배대지 is not None and not df_배대지.empty:
+                st.session_state.pick_df_배대지 = pick_clean_배대지(df_배대지)
+                st.session_state.pick_sheet_url_배대지 = url_배대지
+                st.session_state.pick_sheet_tab_배대지 = tab_배대지
         if st.session_state.pick_df_출고 is not None:
             st.session_state.pick_data_loaded = True
             return True
@@ -811,7 +842,8 @@ def pick_process_scan(barcode):
         log_row = [now, st.session_state.pick_selected_shipment or "", barcode,
                    item["상품명"][:40], result["status"], item["스캔수량"],
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
-        pick_append_log(st.session_state.pick_gsheet_client, log_row)
+        log_url = st.session_state.pick_sheet_url_출고
+        pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
     return result
 
 def pick_get_progress():
@@ -2324,15 +2356,36 @@ with tab8:
     )
 
     if pick_mode == "📊 구글 시트 (실시간)":
+        st.markdown("##### 쉽먼트 시트 (출고지시서)")
+        gs_col1, gs_col2 = st.columns([3, 1])
+        with gs_col1:
+            url_출고 = st.text_input("구글 시트 URL", placeholder="https://docs.google.com/spreadsheets/d/...", key="pick_url_출고")
+        with gs_col2:
+            tab_출고 = st.text_input("탭 이름", value="쉽먼트시트", key="pick_tab_출고")
+
+        st.markdown("##### 배대지 입고 시트 (선택)")
+        gs_col3, gs_col4 = st.columns([3, 1])
+        with gs_col3:
+            url_배대지 = st.text_input("구글 시트 URL", placeholder="비워두면 같은 시트 사용", key="pick_url_배대지")
+        with gs_col4:
+            tab_배대지 = st.text_input("탭 이름", value="배대지입고리스트", key="pick_tab_배대지")
+
+        # 배대지 URL 비어있으면 출고지시서 URL 사용
+        if not url_배대지.strip() and url_출고.strip():
+            url_배대지 = url_출고
+
         if st.button("🔄 구글 시트 연결", use_container_width=True, key="pick_gsheet_btn"):
-            with st.spinner("구글 시트 연결 중..."):
-                success = pick_load_all_data()
-                if success:
-                    pick_init_inventory()
-                    st.success("✅ 구글 시트 연결 완료!")
-                    st.rerun()
-                else:
-                    st.error("연결 실패 — CSV 모드를 사용하세요")
+            if not url_출고.strip():
+                st.error("쉽먼트 시트 URL을 입력해주세요")
+            else:
+                with st.spinner("구글 시트 연결 중..."):
+                    success = pick_load_all_data(url_출고, tab_출고, url_배대지, tab_배대지)
+                    if success:
+                        pick_init_inventory()
+                        st.success("✅ 구글 시트 연결 완료!")
+                        st.rerun()
+                    else:
+                        st.error("연결 실패 — URL과 탭 이름을 확인하세요")
     else:
         pc1, pc2 = st.columns(2)
         with pc1:
@@ -2362,13 +2415,12 @@ with tab8:
     if not st.session_state.pick_data_loaded:
         st.info("위에서 데이터를 연결하세요 (구글 시트 또는 CSV)")
         st.markdown("""
-**초기 설정 방법 (구글 시트 모드):**
-1. `service_account.json` 파일을 앱 폴더에 배치
-2. 구글 스프레드시트에 서비스 계정 이메일을 **편집자**로 공유
-3. `barcode_app.py` 상단의 `PICKING_CONFIG`에서 스프레드시트 ID와 시트 탭 이름 설정
-4. '구글 시트 연결' 클릭
+**구글 시트 모드:**
+1. 구글 시트 URL을 위 입력칸에 붙여넣기
+2. 탭 이름을 정확히 입력 (예: 쉽먼트시트, 배대지입고리스트)
+3. '구글 시트 연결' 클릭
 
-**또는 CSV 모드:**
+**CSV 모드:**
 1. 'CSV 파일 업로드' 선택
 2. 출고지시서 CSV 업로드 (필수)
 3. 배대지 입고 CSV 업로드 (선택)
