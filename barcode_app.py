@@ -564,9 +564,16 @@ def get_gsheet_client():
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        creds = Credentials.from_service_account_file(
-            PICKING_CONFIG["SERVICE_ACCOUNT_FILE"], scopes=scopes
-        )
+        # 1순위: Streamlit Secrets (Cloud 배포용)
+        if "gcp_service_account" in st.secrets:
+            creds = Credentials.from_service_account_info(
+                dict(st.secrets["gcp_service_account"]), scopes=scopes
+            )
+        # 2순위: 로컬 JSON 파일
+        else:
+            creds = Credentials.from_service_account_file(
+                PICKING_CONFIG["SERVICE_ACCOUNT_FILE"], scopes=scopes
+            )
         return gspread.authorize(creds)
     except FileNotFoundError:
         return None
