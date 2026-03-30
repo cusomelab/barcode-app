@@ -628,6 +628,40 @@ def pick_append_log(client, sheet_url, log_entry):
     except Exception:
         return False
 
+def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1):
+    """배대지 시트의 실제 수량을 차감"""
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return False
+        headers = all_values[0]
+        bc_col = None
+        qty_col = None
+        for i, h in enumerate(headers):
+            h_strip = str(h).strip()
+            if h_strip == "바코드":
+                bc_col = i
+            if h_strip == "수량":
+                qty_col = i
+        if bc_col is None or qty_col is None:
+            return False
+        for row_idx in range(1, len(all_values)):
+            if str(all_values[row_idx][bc_col]).strip() == barcode:
+                current = all_values[row_idx][qty_col]
+                try:
+                    current_val = int(float(current))
+                except (ValueError, TypeError):
+                    current_val = 0
+                new_val = max(0, current_val - decrement)
+                ws.update_cell(row_idx + 1, qty_col + 1, new_val)
+                return True
+        return False
+    except Exception:
+        return False
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -844,6 +878,14 @@ def pick_process_scan(barcode):
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
         pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
+        # 배대지 시트 실제 수량 차감
+        if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
+            pick_update_sheet_inventory(
+                st.session_state.pick_gsheet_client,
+                st.session_state.pick_sheet_url_배대지,
+                st.session_state.pick_sheet_tab_배대지,
+                barcode, decrement=1
+            )
     return result
 
 def pick_get_progress():
@@ -2523,6 +2565,18 @@ with tab8:
             st.markdown(
                 f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
                 unsafe_allow_html=True)
+            # 스캔 결과 소리
+            sound_js = {
+                "ok": "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);",
+                "error": "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);",
+                "over": "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>{o.frequency.value=300},100);setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);",
+                "shortage": "o.frequency.value=600;g.gain.value=0.3;o.start();setTimeout(()=>{o.frequency.value=400},100);setTimeout(()=>g.gain.value=0,250);setTimeout(()=>o.stop(),300);",
+            }
+            js_code = sound_js.get(r["status"], sound_js["ok"])
+            from streamlit.components.v1 import html as st_html
+            st_html(f"""<script>
+            try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
+            </script>""", height=0)
 
         st.markdown("---")
         st.subheader("📋 피킹 현황")
