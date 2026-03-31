@@ -1789,32 +1789,76 @@ def _render_labels_4up(pdf_bytes, sorted_groups, dpi=300):
 
 
 def _parse_csv_bytes(csv_bytes):
-    """CSV 바이트 → 아이템 리스트"""
+    """CSV 바이트 → 아이템 리스트 (헤더 기반 매핑 우선, 폴백으로 인덱스 매핑)"""
     text = csv_bytes.decode('utf-8-sig', errors='replace')
     reader = csv.reader(text.splitlines())
     rows = list(reader)
     if not rows:
         return []
+
+    # 헤더 기반 컬럼 매핑 시도
+    headers = [h.strip() for h in rows[0]]
+    # CSV 헤더명 → 내부 필드명 매핑 (다양한 헤더명 지원)
+    HEADER_MAP = {
+        'logisticsCenter': ['물류센터', '물류센터(FC)', 'FC', 'logisticsCenter'],
+        'expectedDate': ['입고예정일', 'expectedDate', '예정일'],
+        'productBarcode': ['바코드', '상품바코드', 'productBarcode', 'barcode'],
+        'productName': ['상품명', '품명', 'productName', '상품이름'],
+        'quantity': ['수량', 'quantity', 'qty', '발주수량'],
+        'shipmentNumber': ['송장번호', '쉽먼트운송장번호', '운송장번호', 'shipmentNumber', '쉽먼트번호'],
+        'orderDate': ['발주일', '주문일', 'orderDate', '발주일자'],
+        'boxNumber': ['박스번호', 'boxNumber', '박스'],
+        'location': ['위치', 'location', '적재위치'],
+    }
+
+    col_map = {}  # 필드명 → 컬럼 인덱스
+    for field, candidates in HEADER_MAP.items():
+        for cand in candidates:
+            for i, h in enumerate(headers):
+                if h == cand:
+                    col_map[field] = i
+                    break
+            if field in col_map:
+                break
+
+    # 핵심 필드(바코드, 상품명)가 헤더에서 매칭되면 헤더 기반 사용
+    use_header = 'productBarcode' in col_map and 'productName' in col_map
+
+    if not use_header:
+        # 폴백: 기존 인덱스 기반 매핑
+        col_map = {
+            'logisticsCenter': 1, 'expectedDate': 3,
+            'productBarcode': 5, 'productName': 6, 'quantity': 7,
+            'shipmentNumber': 8, 'orderDate': 9, 'boxNumber': 10,
+            'location': 12,
+        }
+
     items = []
     for row in rows[1:]:
-        if len(row) < 11 or not (row[1] if len(row) > 1 else '').strip():
+        if len(row) < 5:
             continue
-        def safe(idx, default=''):
-            return row[idx].strip() if idx < len(row) else default
+        def safe(field, default=''):
+            idx = col_map.get(field)
+            if idx is not None and idx < len(row):
+                return row[idx].strip()
+            return default
+        # 물류센터가 비어있으면 스킵 (빈 행 필터링)
+        if not safe('productBarcode') and not safe('shipmentNumber'):
+            continue
         try:
-            qty = int(safe(7, '0') or '0')
+            qty = int(safe('quantity', '0') or '0')
         except ValueError:
             qty = 0
         items.append({
-            'logisticsCenter': safe(1),
-            'expectedDate': safe(3),
-            'productBarcode': safe(5),
-            'productName': safe(6),
+            'logisticsCenter': safe('logisticsCenter'),
+            'expectedDate': safe('expectedDate'),
+            'productBarcode': safe('productBarcode'),
+            'productName': safe('productName'),
             'quantity': qty,
-            'shipmentNumber': safe(8),
-            'orderDate': safe(9),
-            'boxNumber': safe(10),
-            'location': safe(12),
+            'shipmentNumber': safe('shipmentNumber'),
+            'orderDate': safe('orderDate'),
+            'boxNumber': safe('boxNumber'),
+            'location': safe('location'),
         })
     return items
 
