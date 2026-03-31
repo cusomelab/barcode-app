@@ -320,7 +320,7 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     s_card_val= ParagraphStyle('cardval', fontName='NanumBold', fontSize=12, leading=15, textColor=colors.HexColor('#111111'))
     s_card_big= ParagraphStyle('cardbig', fontName='NanumBold', fontSize=22, leading=26, textColor=colors.HexColor('#1a56db'))
     s_th      = ParagraphStyle('th',      fontName='NanumBold', fontSize=9,  leading=11, textColor=colors.white)
-    s_td      = ParagraphStyle('td',      fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
+    s_td      = ParagraphStyle('td',      fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'), wordWrap='CJK')
     s_td_bold = ParagraphStyle('tdbold',  fontName='NanumBold', fontSize=10, leading=12, textColor=colors.HexColor('#1a56db'))
     s_mono    = ParagraphStyle('mono',    fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
     s_footer  = ParagraphStyle('footer',  fontName='NanumReg',  fontSize=8,  leading=10, textColor=colors.HexColor('#888888'))
@@ -427,12 +427,14 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     table_data = [header_row]
 
     for i, item in enumerate(items):
+        # ReportLab Paragraph는 XML 파서를 사용하므로 특수문자 이스케이프 필수
+        from xml.sax.saxutils import escape as _xml_escape
         row = [
-            Paragraph(item.get('productBarcode',''), s_mono),
-            Paragraph(item.get('productName',''),    s_td),
+            Paragraph(_xml_escape(item.get('productBarcode','')), s_mono),
+            Paragraph(_xml_escape(item.get('productName','')),    s_td),
             Paragraph(str(item.get('quantity',0)),   s_td_bold),
-            Paragraph(item.get('location',''),       s_td),
-            Paragraph(item.get('boxNumber',''),      s_td),
+            Paragraph(_xml_escape(item.get('location','')),       s_td),
+            Paragraph(_xml_escape(item.get('boxNumber','')),      s_td),
         ]
         table_data.append(row)
 
@@ -625,6 +627,40 @@ def pick_append_log(client, sheet_url, log_entry):
             ws.append_row(["시간","송장번호","바코드","상품명","결과","스캔수량","필요수량","회차기호","박스번호"])
         ws.append_row(log_entry)
         return True
+    except Exception:
+        return False
+
+def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1):
+    """배대지 시트의 실제 수량을 차감"""
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return False
+        headers = all_values[0]
+        bc_col = None
+        qty_col = None
+        for i, h in enumerate(headers):
+            h_strip = str(h).strip()
+            if h_strip == "바코드":
+                bc_col = i
+            if h_strip == "수량":
+                qty_col = i
+        if bc_col is None or qty_col is None:
+            return False
+        for row_idx in range(1, len(all_values)):
+            if str(all_values[row_idx][bc_col]).strip() == barcode:
+                current = all_values[row_idx][qty_col]
+                try:
+                    current_val = int(float(current))
+                except (ValueError, TypeError):
+                    current_val = 0
+                new_val = max(0, current_val - decrement)
+                ws.update_cell(row_idx + 1, qty_col + 1, new_val)
+                return True
+        return False
     except Exception:
         return False
 
@@ -844,6 +880,14 @@ def pick_process_scan(barcode):
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
         pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
+        # 배대지 시트 실제 수량 차감
+        if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
+            pick_update_sheet_inventory(
+                st.session_state.pick_gsheet_client,
+                st.session_state.pick_sheet_url_배대지,
+                st.session_state.pick_sheet_tab_배대지,
+                barcode, decrement=1
+            )
     return result
 
 def pick_get_progress():
@@ -1777,6 +1821,86 @@ def _parse_csv_bytes(csv_bytes):
     return items
 
 
+def _parse_xlsx_bytes(xlsx_bytes):
+    """엑셀 바이트 → 아이템 리스트 (헤더 기반 자동 매핑)"""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+
+    # 헤더 행 찾기
+    headers = None
+    for row in rows_iter:
+        cells = [str(c).strip() if c is not None else '' for c in row]
+        if '바코드' in cells and '상품명' in cells:
+            headers = cells
+            break
+    if not headers:
+        return []
+
+    FIELD_MAP = {
+        'logisticsCenter': ['물류센터', 'FC'],
+        'expectedDate':    ['입고예정일'],
+        'productBarcode':  ['바코드', '상품바코드'],
+        'productName':     ['상품명', '품명'],
+        'quantity':        ['수량'],
+        'shipmentNumber':  ['쉽먼트운송장', '송장번호', '운송장번호'],
+        'orderDate':       ['발주일'],
+        'boxNumber':       ['박스번호'],
+        'location':        ['위치', '적재위치'],
+    }
+
+    col_map = {}
+    for field, keywords in FIELD_MAP.items():
+        for kw in keywords:
+            for i, h in enumerate(headers):
+                if h == kw or h.startswith(kw) or kw in h:
+                    col_map[field] = i
+                    break
+            if field in col_map:
+                break
+
+    if 'productBarcode' not in col_map:
+        return []
+
+    items = []
+    for row in rows_iter:
+        cells = [str(c).strip() if c is not None else '' for c in row]
+        def safe(field, default=''):
+            idx = col_map.get(field)
+            if idx is not None and idx < len(cells):
+                return cells[idx]
+            return default
+        barcode = safe('productBarcode')
+        if not barcode:
+            continue
+        try:
+            qty = int(float(safe('quantity', '0') or '0'))
+        except (ValueError, TypeError):
+            qty = 0
+        # 쉽먼트운송장번호가 과학표기법(4.62E+11)인 경우 정수로 변환
+        shipment = safe('shipmentNumber')
+        try:
+            if 'E' in shipment or 'e' in shipment:
+                shipment = str(int(float(shipment)))
+        except (ValueError, TypeError):
+            pass
+        items.append({
+            'logisticsCenter': safe('logisticsCenter'),
+            'expectedDate': safe('expectedDate'),
+            'productBarcode': barcode,
+            'productName': safe('productName'),
+            'quantity': qty,
+            'shipmentNumber': shipment,
+            'orderDate': safe('orderDate'),
+            'boxNumber': safe('boxNumber'),
+            'location': safe('location'),
+        })
+    wb.close()
+    return items
+    return items
+
+
 with tab6:
     st.header('🚛 쉽먼트 통합 관리')
     st.caption('CSV + 매니페스트 + 라벨을 한번에 업로드하면 출고지시서 생성 + 송장번호순 정렬 + 라벨 4분할 + 전체 통합 PDF를 만듭니다')
@@ -1789,7 +1913,7 @@ with tab6:
 
     uploaded_files = st.file_uploader(
         '파일 선택 (CSV + PDF)',
-        type=['csv', 'pdf'],
+        type=['csv', 'xlsx', 'pdf'],
         accept_multiple_files=True,
         key='shipment_files'
     )
@@ -1801,13 +1925,14 @@ with tab6:
         label_files = {}
 
         for f in uploaded_files:
-            if f.name.lower().endswith('.csv'):
+            fname = f.name.lower()
+            if fname.endswith('.csv') or fname.endswith('.xlsx'):
                 csv_file = f
-            elif 'manifest' in f.name.lower():
+            elif 'manifest' in fname:
                 sid = re.search(r'\((\d+)\)', f.name)
                 if sid:
                     manifest_files[sid.group(1)] = f
-            elif 'label' in f.name.lower():
+            elif 'label' in fname:
                 sid = re.search(r'\((\d+)\)', f.name)
                 if sid:
                     label_files[sid.group(1)] = f
@@ -1872,8 +1997,11 @@ with tab6:
                     so_pages = 0
                     if csv_file:
                         status.text('📄 출고지시서 생성 중...')
-                        csv_bytes = csv_file.read()
-                        items = _parse_csv_bytes(csv_bytes)
+                        file_bytes = csv_file.read()
+                        if csv_file.name.lower().endswith('.xlsx'):
+                            items = _parse_xlsx_bytes(file_bytes)
+                        else:
+                            items = _parse_csv_bytes(file_bytes)
 
                         if items:
                             grouped = OrderedDict()
@@ -2094,7 +2222,7 @@ with tab7:
 
     reprint_files = st.file_uploader(
         '파일 선택 (CSV + PDF)',
-        type=['csv', 'pdf'],
+        type=['csv', 'xlsx', 'pdf'],
         accept_multiple_files=True,
         key='reprint_files'
     )
@@ -2105,13 +2233,14 @@ with tab7:
         rp_labels = {}
 
         for f in reprint_files:
-            if f.name.lower().endswith('.csv'):
+            fname = f.name.lower()
+            if fname.endswith('.csv') or fname.endswith('.xlsx'):
                 rp_csv = f
-            elif 'manifest' in f.name.lower():
+            elif 'manifest' in fname:
                 sid = re.search(r'\((\d+)\)', f.name)
                 if sid:
                     rp_manifests[sid.group(1)] = f
-            elif 'label' in f.name.lower():
+            elif 'label' in fname:
                 sid = re.search(r'\((\d+)\)', f.name)
                 if sid:
                     rp_labels[sid.group(1)] = f
@@ -2151,13 +2280,16 @@ with tab7:
                 rp_status = st.empty()
 
                 try:
-                    # ===== 1. CSV 파싱 → 송장번호 목록 추출 =====
-                    rp_status.text('📄 CSV 분석 중...')
-                    csv_bytes = rp_csv.read()
-                    rp_items = _parse_csv_bytes(csv_bytes)
+                    # ===== 1. CSV/엑셀 파싱 → 송장번호 목록 추출 =====
+                    rp_status.text('📄 데이터 분석 중...')
+                    file_bytes = rp_csv.read()
+                    if rp_csv.name.lower().endswith('.xlsx'):
+                        rp_items = _parse_xlsx_bytes(file_bytes)
+                    else:
+                        rp_items = _parse_csv_bytes(file_bytes)
 
                     if not rp_items:
-                        st.error('CSV에서 항목을 찾을 수 없습니다.')
+                        st.error('파일에서 항목을 찾을 수 없습니다. CSV 또는 엑셀 파일을 확인하세요.')
                         st.stop()
 
                     # CSV의 송장번호(shipmentNumber) 목록
@@ -2523,6 +2655,18 @@ with tab8:
             st.markdown(
                 f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
                 unsafe_allow_html=True)
+            # 스캔 결과 소리
+            sound_js = {
+                "ok": "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);",
+                "error": "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);",
+                "over": "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>{o.frequency.value=300},100);setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);",
+                "shortage": "o.frequency.value=600;g.gain.value=0.3;o.start();setTimeout(()=>{o.frequency.value=400},100);setTimeout(()=>g.gain.value=0,250);setTimeout(()=>o.stop(),300);",
+            }
+            js_code = sound_js.get(r["status"], sound_js["ok"])
+            from streamlit.components.v1 import html as st_html
+            st_html(f"""<script>
+            try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
+            </script>""", height=0)
 
         st.markdown("---")
         st.subheader("📋 피킹 현황")
