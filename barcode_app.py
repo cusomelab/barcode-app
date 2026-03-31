@@ -1815,11 +1815,21 @@ def _parse_csv_bytes(csv_bytes):
     for field, candidates in HEADER_MAP.items():
         for cand in candidates:
             for i, h in enumerate(headers):
-                if h == cand:
+                # 정확히 일치하거나, 헤더가 후보 텍스트로 시작하면 매칭
+                if h == cand or h.startswith(cand):
                     col_map[field] = i
                     break
             if field in col_map:
                 break
+        # 아직 못찾았으면 헤더에 후보 텍스트가 포함되어 있는지 확인
+        if field not in col_map:
+            for cand in candidates:
+                for i, h in enumerate(headers):
+                    if cand in h and i not in col_map.values():
+                        col_map[field] = i
+                        break
+                if field in col_map:
+                    break
 
     # 핵심 필드(바코드, 상품명)가 헤더에서 매칭되면 헤더 기반 사용
     use_header = 'productBarcode' in col_map and 'productName' in col_map
