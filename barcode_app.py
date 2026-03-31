@@ -320,7 +320,7 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     s_card_val= ParagraphStyle('cardval', fontName='NanumBold', fontSize=12, leading=15, textColor=colors.HexColor('#111111'))
     s_card_big= ParagraphStyle('cardbig', fontName='NanumBold', fontSize=22, leading=26, textColor=colors.HexColor('#1a56db'))
     s_th      = ParagraphStyle('th',      fontName='NanumBold', fontSize=9,  leading=11, textColor=colors.white)
-    s_td      = ParagraphStyle('td',      fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
+    s_td      = ParagraphStyle('td',      fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'), wordWrap='CJK')
     s_td_bold = ParagraphStyle('tdbold',  fontName='NanumBold', fontSize=10, leading=12, textColor=colors.HexColor('#1a56db'))
     s_mono    = ParagraphStyle('mono',    fontName='NanumReg',  fontSize=9,  leading=12, textColor=colors.HexColor('#111111'))
     s_footer  = ParagraphStyle('footer',  fontName='NanumReg',  fontSize=8,  leading=10, textColor=colors.HexColor('#888888'))
@@ -427,12 +427,14 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     table_data = [header_row]
 
     for i, item in enumerate(items):
+        # ReportLab Paragraph는 XML 파서를 사용하므로 특수문자 이스케이프 필수
+        from xml.sax.saxutils import escape as _xml_escape
         row = [
-            Paragraph(item.get('productBarcode',''), s_mono),
-            Paragraph(item.get('productName',''),    s_td),
+            Paragraph(_xml_escape(item.get('productBarcode','')), s_mono),
+            Paragraph(_xml_escape(item.get('productName','')),    s_td),
             Paragraph(str(item.get('quantity',0)),   s_td_bold),
-            Paragraph(item.get('location',''),       s_td),
-            Paragraph(item.get('boxNumber',''),      s_td),
+            Paragraph(_xml_escape(item.get('location','')),       s_td),
+            Paragraph(_xml_escape(item.get('boxNumber','')),      s_td),
         ]
         table_data.append(row)
 
