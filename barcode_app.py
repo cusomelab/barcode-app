@@ -1789,103 +1789,101 @@ def _render_labels_4up(pdf_bytes, sorted_groups, dpi=300):
 
 
 def _parse_csv_bytes(csv_bytes):
-    """CSV 바이트 → 아이템 리스트 (구분자 자동감지 + 헤더 자동탐색)"""
+    """CSV 바이트 → 아이템 리스트 (pandas 기반, 구분자/인코딩 자동감지)"""
+    import pandas as pd
+
     text = csv_bytes.decode('utf-8-sig', errors='replace')
 
-    # 1) 구분자 자동 감지 (탭/콤마/세미콜론)
-    sample = text[:4000]
+    # 1) 구분자 자동 감지
     delimiter = ','
     try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=',\t;')
+        dialect = csv.Sniffer().sniff(text[:4000], delimiters=',\t;')
         delimiter = dialect.delimiter
     except csv.Error:
-        # 탭이 콤마보다 많으면 탭 구분자
-        if sample.count('\t') > sample.count(','):
+        if text[:4000].count('\t') > text[:4000].count(','):
             delimiter = '\t'
 
-    reader = csv.reader(text.splitlines(), delimiter=delimiter)
-    rows = list(reader)
-    if not rows:
+    # 2) pandas로 읽기 (인용부호, 콤마 포함 필드 등 자동 처리)
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=delimiter, dtype=str, keep_default_na=False)
+    except Exception:
+        # 파싱 실패 시 탭으로 재시도
+        try:
+            df = pd.read_csv(io.StringIO(text), sep='\t', dtype=str, keep_default_na=False)
+        except Exception:
+            return []
+
+    if df.empty:
         return []
 
-    # 2) 헤더 행 자동 탐색 (첫 5행 중 '바코드'와 '상품명'이 포함된 행)
-    HEADER_MAP = {
+    # 3) 컬럼명 정규화 (공백 제거)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # 4) 컬럼 매핑 — 헤더명으로 자동 탐지
+    FIELD_MAP = {
         'logisticsCenter': ['물류센터', 'FC'],
-        'expectedDate': ['입고예정일', '예정일'],
-        'productBarcode': ['바코드', '상품바코드', 'barcode'],
-        'productName': ['상품명', '품명', '상품이름'],
-        'quantity': ['수량', 'qty'],
-        'shipmentNumber': ['쉽먼트운송장', '송장번호', '운송장번호', '쉽먼트번호'],
-        'orderDate': ['발주일', '주문일'],
-        'boxNumber': ['박스번호', '박스'],
-        'location': ['위치', '적재위치'],
+        'expectedDate':    ['입고예정일', '예정일'],
+        'productBarcode':  ['바코드', '상품바코드'],
+        'productName':     ['상품명', '품명', '상품이름'],
+        'quantity':        ['수량'],
+        'shipmentNumber':  ['쉽먼트운송장', '송장번호', '운송장번호'],
+        'orderDate':       ['발주일', '주문일'],
+        'boxNumber':       ['박스번호'],
+        'location':        ['위치', '적재위치'],
     }
 
-    def _match_headers(row_cells):
-        """행의 셀들을 HEADER_MAP과 매칭하여 col_map 반환"""
-        cmap = {}
-        for field, candidates in HEADER_MAP.items():
-            for i, cell in enumerate(row_cells):
-                c = cell.strip()
-                for cand in candidates:
-                    if c == cand or c.startswith(cand) or cand in c:
-                        if i not in cmap.values():
-                            cmap[field] = i
-                            break
-                if field in cmap:
+    col_map = {}  # 내부필드명 → 실제 DF 컬럼명
+    for field, keywords in FIELD_MAP.items():
+        for kw in keywords:
+            for col in df.columns:
+                if col == kw or col.startswith(kw) or kw in col:
+                    col_map[field] = col
                     break
-        return cmap
+            if field in col_map:
+                break
 
-    header_row_idx = -1
-    col_map = {}
-    for ri in range(min(5, len(rows))):
-        cmap = _match_headers(rows[ri])
-        if 'productBarcode' in cmap and 'productName' in cmap:
-            col_map = cmap
-            header_row_idx = ri
-            break
-
-    # 헤더를 못 찾으면 인덱스 기반 폴백 (첫 행 스킵)
-    if header_row_idx < 0:
-        header_row_idx = 0
-        col_map = {
+    # 핵심 컬럼 없으면 인덱스 기반 폴백
+    if 'productBarcode' not in col_map or 'productName' not in col_map:
+        idx_map = {
             'logisticsCenter': 1, 'expectedDate': 3,
             'productBarcode': 5, 'productName': 6, 'quantity': 7,
             'shipmentNumber': 8, 'orderDate': 9, 'boxNumber': 10,
-            'location': 12,
         }
+        cols = list(df.columns)
+        col_map = {}
+        for field, idx in idx_map.items():
+            if idx < len(cols):
+                col_map[field] = cols[idx]
+        if 12 < len(cols):
+            col_map['location'] = cols[12]
 
-    # 3) 데이터 행 파싱 (헤더 행 다음부터)
+    # 5) 아이템 리스트 생성
+    def safe_get(row, field):
+        col = col_map.get(field)
+        if col and col in row.index:
+            return str(row[col]).strip()
+        return ''
+
     items = []
-    for row in rows[header_row_idx + 1:]:
-        if len(row) < 3:
-            continue
-        def safe(field, default=''):
-            idx = col_map.get(field)
-            if idx is not None and idx < len(row):
-                return row[idx].strip()
-            return default
-        barcode = safe('productBarcode')
-        shipment = safe('shipmentNumber')
+    for _, row in df.iterrows():
+        barcode = safe_get(row, 'productBarcode')
+        shipment = safe_get(row, 'shipmentNumber')
         if not barcode and not shipment:
             continue
-        # 헤더 행이 중복 포함된 경우 스킵
-        if barcode in ('바코드', '상품바코드', 'barcode'):
-            continue
         try:
-            qty = int(float(safe('quantity', '0') or '0'))
+            qty = int(float(safe_get(row, 'quantity') or '0'))
         except (ValueError, TypeError):
             qty = 0
         items.append({
-            'logisticsCenter': safe('logisticsCenter'),
-            'expectedDate': safe('expectedDate'),
+            'logisticsCenter': safe_get(row, 'logisticsCenter'),
+            'expectedDate': safe_get(row, 'expectedDate'),
             'productBarcode': barcode,
-            'productName': safe('productName'),
+            'productName': safe_get(row, 'productName'),
             'quantity': qty,
             'shipmentNumber': shipment,
-            'orderDate': safe('orderDate'),
-            'boxNumber': safe('boxNumber'),
-            'location': safe('location'),
+            'orderDate': safe_get(row, 'orderDate'),
+            'boxNumber': safe_get(row, 'boxNumber'),
+            'location': safe_get(row, 'location'),
         })
     return items
 
@@ -2272,6 +2270,18 @@ with tab7:
                     if not rp_items:
                         st.error('CSV에서 항목을 찾을 수 없습니다.')
                         st.stop()
+
+                    # 파싱 결과 확인용
+                    with st.expander(f'🔍 CSV 파싱 결과 확인 ({len(rp_items)}건)', expanded=False):
+                        import pandas as _rpd
+                        preview = [{
+                            '바코드': it['productBarcode'],
+                            '상품명': it['productName'],
+                            '수량': it['quantity'],
+                            '송장번호': it['shipmentNumber'][-6:] if it['shipmentNumber'] else '',
+                            '박스': it['boxNumber'],
+                        } for it in rp_items[:20]]
+                        st.dataframe(_rpd.DataFrame(preview), use_container_width=True, hide_index=True)
 
                     # CSV의 송장번호(shipmentNumber) 목록
                     csv_invoices = set()
