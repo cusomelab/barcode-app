@@ -875,19 +875,25 @@ def pick_process_scan(barcode):
     st.session_state.pick_scan_counter += 1
 
     if st.session_state.pick_use_gsheet and st.session_state.pick_gsheet_client:
+        import threading
         log_row = [now, st.session_state.pick_selected_shipment or "", barcode,
                    item["상품명"][:40], result["status"], item["스캔수량"],
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
-        pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
-        # 배대지 시트 실제 수량 차감
-        if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
-            pick_update_sheet_inventory(
-                st.session_state.pick_gsheet_client,
-                st.session_state.pick_sheet_url_배대지,
-                st.session_state.pick_sheet_tab_배대지,
-                barcode, decrement=1
-            )
+        # 백그라운드 스레드로 구글 시트 업데이트 (스캔 속도 향상)
+        def _bg_sheet_update():
+            try:
+                pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
+                if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
+                    pick_update_sheet_inventory(
+                        st.session_state.pick_gsheet_client,
+                        st.session_state.pick_sheet_url_배대지,
+                        st.session_state.pick_sheet_tab_배대지,
+                        barcode, decrement=1
+                    )
+            except Exception:
+                pass
+        threading.Thread(target=_bg_sheet_update, daemon=True).start()
     return result
 
 def pick_get_progress():
@@ -2648,6 +2654,22 @@ with tab8:
         if scanned:
             pick_process_scan(scanned)
             st.rerun()
+
+        # 바코드 입력창에 자동 포커스 유지
+        from streamlit.components.v1 import html as _st_html
+        _st_html("""<script>
+        function focusScan() {
+            const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+            for (const inp of inputs) {
+                if (inp.placeholder && inp.placeholder.includes('스캐너')) {
+                    inp.focus();
+                    return;
+                }
+            }
+        }
+        focusScan();
+        setInterval(focusScan, 1500);
+        </script>""", height=0)
 
         r = st.session_state.pick_last_scan_result
         if r:
