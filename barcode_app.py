@@ -334,7 +334,23 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
 
     story = []
 
-    # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스 ──────────
+    # ── 송장번호 바코드 (피킹검증 스캔용) ───────────────
+    # CSV에 있는 송장번호(shipmentNumber)를 바코드로 추가
+    invoice_for_barcode = first.get('shipmentNumber', '') or ''
+    barcode_flowable = None
+    if invoice_for_barcode:
+        try:
+            from reportlab.platypus import Image as RLImage
+            bc_img = get_barcode_img(str(invoice_for_barcode), write_text=False)
+            bc_buf = io.BytesIO()
+            bc_img.save(bc_buf, format='PNG')
+            bc_buf.seek(0)
+            barcode_flowable = RLImage(bc_buf, width=70*mm, height=14*mm)
+            barcode_flowable.hAlign = 'RIGHT'
+        except Exception:
+            barcode_flowable = None
+
+    # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스(+바코드) ──────────
     if shipment_id and box_number:
         shipment_text = f'쉽먼트 {shipment_id} | 박스 {box_number}'
     elif shipment_id:
@@ -342,10 +358,24 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     else:
         shipment_text = ''
 
-    if shipment_text:
+    if shipment_text or barcode_flowable:
+        right_cell = []
+        if barcode_flowable:
+            right_cell.append(barcode_flowable)
+            right_cell.append(Spacer(1, 1*mm))
+        if shipment_text:
+            right_cell.append(Paragraph(shipment_text, s_shipment))
+        right_tbl = Table([[c] for c in right_cell], colWidths=[usable_w * 0.5])
+        right_tbl.setStyle(TableStyle([
+            ('ALIGN', (0,0), (-1,-1), 'RIGHT'),
+            ('LEFTPADDING', (0,0), (-1,-1), 0),
+            ('RIGHTPADDING', (0,0), (-1,-1), 0),
+            ('TOPPADDING', (0,0), (-1,-1), 0),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 0),
+        ]))
         header_data = [[
             Paragraph('출고 작업 지시서', s_title),
-            Paragraph(shipment_text, s_shipment),
+            right_tbl,
         ]]
         header_tbl = Table(header_data, colWidths=[usable_w * 0.5, usable_w * 0.5])
         header_tbl.setStyle(TableStyle([
@@ -502,6 +532,72 @@ def merge_pdfs(pdf_buffers):
     writer.write(out)
     out.seek(0)
     return out
+
+
+def create_shipment_barcodes_pdf(shipment_numbers):
+    """송장번호 리스트 → 바코드 PDF (한 페이지에 여러 송장 배치)"""
+    from reportlab.platypus import Image as RLImage
+    buf = io.BytesIO()
+    PAGE_W, PAGE_H = A4
+    MARGIN = 15 * mm
+
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=MARGIN, rightMargin=MARGIN,
+        topMargin=MARGIN, bottomMargin=MARGIN
+    )
+
+    s_title = ParagraphStyle('btitle', fontName='NanumBold', fontSize=14, leading=18, alignment=1, spaceAfter=8)
+    s_num = ParagraphStyle('bnum', fontName='NanumReg', fontSize=10, leading=12, alignment=1, spaceAfter=4)
+
+    story = [Paragraph('📦 송장번호 바코드 (피킹검증 스캔용)', s_title), Spacer(1, 4*mm)]
+
+    # 2열 그리드로 배치
+    rows_data = []
+    pair = []
+    for sn in shipment_numbers:
+        try:
+            img = get_barcode_img(str(sn), write_text=False)
+            img_buf = io.BytesIO()
+            img.save(img_buf, format='PNG')
+            img_buf.seek(0)
+            rl_img = RLImage(img_buf, width=80*mm, height=22*mm)
+            rl_img.hAlign = 'CENTER'
+            cell = [Paragraph(f'<b>{sn}</b>', s_num), rl_img]
+            cell_tbl = Table([[c] for c in cell], colWidths=[85*mm])
+            cell_tbl.setStyle(TableStyle([
+                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('LEFTPADDING', (0,0), (-1,-1), 0),
+                ('RIGHTPADDING', (0,0), (-1,-1), 0),
+                ('TOPPADDING', (0,0), (-1,-1), 1),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 1),
+            ]))
+            pair.append(cell_tbl)
+            if len(pair) == 2:
+                rows_data.append(pair)
+                pair = []
+        except Exception:
+            continue
+    if pair:
+        pair.append(Paragraph('', s_num))
+        rows_data.append(pair)
+
+    if rows_data:
+        grid = Table(rows_data, colWidths=[90*mm, 90*mm])
+        grid.setStyle(TableStyle([
+            ('BOX', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+            ('INNERGRID', (0,0), (-1,-1), 0.5, colors.HexColor('#cccccc')),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+            ('LEFTPADDING', (0,0), (-1,-1), 4),
+            ('RIGHTPADDING', (0,0), (-1,-1), 4),
+        ]))
+        story.append(grid)
+
+    doc.build(story)
+    buf.seek(0)
+    return buf
 
 
 # ══════════════════════════════════════════════════════
