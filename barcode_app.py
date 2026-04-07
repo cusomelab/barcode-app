@@ -2764,33 +2764,50 @@ with tab8:
 
             # 음성 안내 (한국어 TTS)
             box_label = r.get("박스", "")
+            # 1번박스 → 일번박스 형태로 변환
+            _KOR_NUMS = {'1':'일','2':'이','3':'삼','4':'사','5':'오','6':'육','7':'칠','8':'팔','9':'구','10':'십'}
+            def _kor_box(label):
+                import re as _re
+                m = _re.match(r'(\d+)번박스', label or '')
+                if not m:
+                    return label
+                n = m.group(1)
+                kor = _KOR_NUMS.get(n, n)
+                return f"{kor}번박스"
+            box_kor = _kor_box(box_label)
+
             if r["status"] == "error":
                 speak_text = "없는 상품 입니다"
             elif r["status"] == "over":
                 speak_text = "수량 초과"
             elif r["status"] == "shortage":
-                speak_text = f"{box_label} 입니다 재고 부족" if box_label else "재고 부족"
-            elif box_label:
-                speak_text = f"{box_label} 입니다"
+                speak_text = f"{box_kor} 재고 부족" if box_kor else "재고 부족"
+            elif box_kor:
+                speak_text = f"{box_kor}"
             else:
                 speak_text = "확인"
 
             # JS 문자열 안전 이스케이프
             speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
+            # 매 스캔마다 새 컴포넌트로 강제 재실행 (같은 박스도 소리 나도록)
+            scan_id = st.session_state.pick_scan_counter
 
             from streamlit.components.v1 import html as st_html
             st_html(f"""<script>
+            // scan_id={scan_id} (강제 재실행용)
             try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
             try{{
-                var u = new SpeechSynthesisUtterance('{speak_text_js}');
-                u.lang = 'ko-KR';
-                u.rate = 1.3;
-                u.volume = 1.0;
-                var voices = window.speechSynthesis.getVoices();
-                var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                if (koVoice) u.voice = koVoice;
                 window.speechSynthesis.cancel();
-                setTimeout(() => window.speechSynthesis.speak(u), 250);
+                setTimeout(function(){{
+                    var u = new SpeechSynthesisUtterance('{speak_text_js}');
+                    u.lang = 'ko-KR';
+                    u.rate = 1.3;
+                    u.volume = 1.0;
+                    var voices = window.speechSynthesis.getVoices();
+                    var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                    if (koVoice) u.voice = koVoice;
+                    window.speechSynthesis.speak(u);
+                }}, 100);
             }}catch(e){{}}
             </script>""", height=0)
 
