@@ -724,7 +724,7 @@ def pick_clean_배대지(df):
 def pick_init_session():
     defaults = {
         "pick_df_출고": None, "pick_df_배대지": None,
-        "pick_selected_shipment": None, "pick_picking_state": {},
+        "pick_selected_shipment": None, "pick_selected_shipments": [], "pick_picking_state": {},
         "pick_inventory_state": {}, "pick_scan_log": [],
         "pick_last_scan_result": None, "pick_scan_counter": 0,
         "pick_completed_shipments": set(), "pick_shortage_items": [],
@@ -777,41 +777,59 @@ def pick_init_inventory():
         inventory[key] = inventory.get(key, 0) + qty
     st.session_state.pick_inventory_state = inventory
 
-def pick_init_picking(shipment_id):
+def pick_init_picking(shipment_ids):
+    """단일 또는 다중 쉽먼트 ID를 받아 피킹 초기화.
+    다중일 경우 각 바코드별로 어느 쉽먼트(박스)에 속하는지 추적."""
+    if isinstance(shipment_ids, str):
+        shipment_ids = [shipment_ids]
+
     df = st.session_state.pick_df_출고
-    shipment_df = df[df["쉽먼트운송장번호"] == shipment_id]
-    if shipment_df.empty:
-        st.error(f"쉽먼트 {shipment_id}를 찾을 수 없습니다")
-        return
     picking = {}
     shortage_items = []
-    for _, row in shipment_df.iterrows():
-        bc = row["바코드"]
-        symbol = row.get("회차기호", "")
-        qty = row["수량"]
-        pick_status = row.get("피킹상태", "피킹가능")
-        if pick_status == "부족":
-            shortage_items.append({
-                "바코드": bc, "상품명": row["상품명"],
-                "부족수량": abs(row.get("박스내수량", 0) or 0),
-                "박스번호": row.get("박스번호", ""),
-            })
+
+    for ship_idx, shipment_id in enumerate(shipment_ids, start=1):
+        shipment_df = df[df["쉽먼트운송장번호"] == shipment_id]
+        if shipment_df.empty:
+            st.error(f"쉽먼트 {shipment_id}를 찾을 수 없습니다")
             continue
-        if bc in picking:
-            picking[bc]["필요수량"] += qty
-        else:
-            inv_key = (symbol, bc)
-            inv_qty = st.session_state.pick_inventory_state.get(inv_key, None)
-            picking[bc] = {
-                "상품명": row["상품명"], "필요수량": qty, "스캔수량": 0,
-                "회차기호": symbol if symbol else "N/A",
-                "박스번호": row.get("박스번호", ""), "박스넘버": row.get("박스넘버", ""),
-                "박스내수량": row.get("박스내수량", None), "배대지잔여": inv_qty,
-                "SKU_ID": row.get("SKU ID", ""), "물류센터": row.get("물류센터(FC)", ""),
-            }
+        ship_label = f"{ship_idx}번박스"
+        for _, row in shipment_df.iterrows():
+            bc = row["바코드"]
+            symbol = row.get("회차기호", "")
+            qty = row["수량"]
+            pick_status = row.get("피킹상태", "피킹가능")
+            if pick_status == "부족":
+                shortage_items.append({
+                    "바코드": bc, "상품명": row["상품명"],
+                    "부족수량": abs(row.get("박스내수량", 0) or 0),
+                    "박스번호": row.get("박스번호", ""),
+                    "쉽먼트박스": ship_label,
+                })
+                continue
+            if bc in picking:
+                picking[bc]["필요수량"] += qty
+                # 같은 바코드가 여러 쉽먼트에 있으면 박스 라벨을 합침
+                if ship_label not in picking[bc]["쉽먼트박스목록"]:
+                    picking[bc]["쉽먼트박스목록"].append(ship_label)
+                # 송장별 필요수량 추적
+                picking[bc]["송장별수량"][ship_label] = picking[bc]["송장별수량"].get(ship_label, 0) + qty
+            else:
+                inv_key = (symbol, bc)
+                inv_qty = st.session_state.pick_inventory_state.get(inv_key, None)
+                picking[bc] = {
+                    "상품명": row["상품명"], "필요수량": qty, "스캔수량": 0,
+                    "회차기호": symbol if symbol else "N/A",
+                    "박스번호": row.get("박스번호", ""), "박스넘버": row.get("박스넘버", ""),
+                    "박스내수량": row.get("박스내수량", None), "배대지잔여": inv_qty,
+                    "SKU_ID": row.get("SKU ID", ""), "물류센터": row.get("물류센터(FC)", ""),
+                    "쉽먼트박스목록": [ship_label],
+                    "송장별수량": {ship_label: qty},
+                }
+
     st.session_state.pick_picking_state = picking
     st.session_state.pick_shortage_items = shortage_items
-    st.session_state.pick_selected_shipment = shipment_id
+    st.session_state.pick_selected_shipment = " + ".join(shipment_ids) if len(shipment_ids) > 1 else shipment_ids[0]
+    st.session_state.pick_selected_shipments = shipment_ids
     st.session_state.pick_scan_log = []
     st.session_state.pick_last_scan_result = None
     st.session_state.pick_scan_counter = 0
@@ -843,10 +861,20 @@ def pick_process_scan(barcode):
     item = state[barcode]
     item["스캔수량"] += 1
 
+    # 다중 쉽먼트일 때 어느 박스에 담을지 결정 (송장별수량 기준 순서대로)
+    box_label = ""
+    if "송장별수량" in item:
+        cumulative = 0
+        for ship_label, ship_qty in item["송장별수량"].items():
+            cumulative += ship_qty
+            if item["스캔수량"] <= cumulative:
+                box_label = ship_label
+                break
+
     if item["스캔수량"] > item["필요수량"]:
         result = {"status": "over", "message": f"⚠️ 수량 초과! {item['상품명'][:35]}",
                   "detail": f"필요 {item['필요수량']}개인데 {item['스캔수량']}번째 스캔",
-                  "barcode": barcode, "상품명": item["상품명"], "시간": now}
+                  "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label}
         st.session_state.pick_scan_log.append(result)
         st.session_state.pick_last_scan_result = result
         st.session_state.pick_scan_counter += 1
@@ -864,11 +892,12 @@ def pick_process_scan(barcode):
             item["배대지잔여"] = 0
 
     remaining = item["필요수량"] - item["스캔수량"]
+    box_msg = f" → {box_label}" if box_label else ""
     result = {
         "status": "ok" if not shortage_warning else "shortage",
-        "message": f"✅ {item['상품명'][:35]}",
+        "message": f"✅ {item['상품명'][:35]}{box_msg}",
         "detail": f"스캔 {item['스캔수량']}/{item['필요수량']} (남은: {remaining}){shortage_warning}",
-        "barcode": barcode, "상품명": item["상품명"], "시간": now,
+        "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label,
     }
     st.session_state.pick_scan_log.append(result)
     st.session_state.pick_last_scan_result = result
@@ -2567,10 +2596,11 @@ with tab8:
         # ── 송장번호 선택 ──
         st.markdown('<div class="shipment-input">', unsafe_allow_html=True)
         st.markdown("### 📋 쉽먼트 선택")
+        st.caption("여러 송장을 한 번에 처리하려면 쉼표(,) 또는 줄바꿈으로 구분하세요. 1번박스, 2번박스로 자동 안내됩니다.")
 
         p_col1, p_col2 = st.columns([2, 1])
         with p_col1:
-            input_shipment = st.text_input("송장번호 직접 입력", placeholder="운송장번호 입력 후 Enter", key="pick_shipment_input")
+            input_shipment = st.text_area("송장번호 직접 입력 (1개 또는 여러 개)", placeholder="예: 461938764685, 461938764686\n또는 한 줄에 하나씩", key="pick_shipment_input", height=80)
         with p_col2:
             pick_df = st.session_state.pick_df_출고
             centers = ["전체"] + sorted(pick_df["물류센터(FC)"].unique().tolist()) if "물류센터(FC)" in pick_df.columns else ["전체"]
@@ -2598,23 +2628,41 @@ with tab8:
             key="pick_shipment_select",
         )
 
-        target = input_shipment.strip() if input_shipment else selected_shipment
+        # 다중 송장 파싱: 쉼표/공백/줄바꿈으로 구분
+        input_targets = []
+        if input_shipment and input_shipment.strip():
+            for token in re.split(r'[,\s\n]+', input_shipment.strip()):
+                token = token.strip()
+                if token:
+                    input_targets.append(token)
 
         if st.button("🚀 피킹 시작", type="primary", use_container_width=True, key="pick_start_btn"):
-            if target:
-                valid_ids = pick_df["쉽먼트운송장번호"].unique()
-                if target in valid_ids:
-                    pick_init_picking(target)
-                    st.rerun()
-                else:
-                    matches = [s for s in valid_ids if s.endswith(target)]
-                    if len(matches) == 1:
-                        pick_init_picking(matches[0])
-                        st.rerun()
-                    elif len(matches) > 1:
-                        st.warning(f"'{target}'에 매칭되는 쉽먼트가 {len(matches)}개입니다.")
+            valid_ids = list(pick_df["쉽먼트운송장번호"].unique())
+            resolved = []
+            errors = []
+            if input_targets:
+                for tgt in input_targets:
+                    if tgt in valid_ids:
+                        resolved.append(tgt)
                     else:
-                        st.error(f"'{target}'에 해당하는 쉽먼트를 찾을 수 없습니다.")
+                        matches = [s for s in valid_ids if s.endswith(tgt)]
+                        if len(matches) == 1:
+                            resolved.append(matches[0])
+                        elif len(matches) > 1:
+                            errors.append(f"'{tgt}'에 매칭되는 쉽먼트가 {len(matches)}개입니다.")
+                        else:
+                            errors.append(f"'{tgt}'에 해당하는 쉽먼트를 찾을 수 없습니다.")
+            elif selected_shipment:
+                resolved.append(selected_shipment)
+
+            if errors:
+                for err in errors:
+                    st.error(err)
+            elif resolved:
+                pick_init_picking(resolved)
+                st.rerun()
+            else:
+                st.warning("송장번호를 입력하거나 목록에서 선택해주세요.")
         st.markdown('</div>', unsafe_allow_html=True)
     else:
         # ── 피킹 진행 화면 ──
@@ -2624,10 +2672,16 @@ with tab8:
         hcol1, hcol2 = st.columns([4, 1])
         with hcol1:
             item0 = list(st.session_state.pick_picking_state.values())[0] if st.session_state.pick_picking_state else {}
-            st.markdown(f"**쉽먼트:** `{shipment_id}` | **센터:** {item0.get('물류센터','')} | **회차:** {item0.get('회차기호','')}")
+            ships = st.session_state.get('pick_selected_shipments', [shipment_id])
+            if len(ships) > 1:
+                ship_lines = " | ".join([f"**{i+1}번박스:** `{s[-6:]}`" for i, s in enumerate(ships)])
+                st.markdown(f"{ship_lines} | **센터:** {item0.get('물류센터','')}")
+            else:
+                st.markdown(f"**쉽먼트:** `{shipment_id}` | **센터:** {item0.get('물류센터','')} | **회차:** {item0.get('회차기호','')}")
         with hcol2:
             if st.button("🔄 다른 쉽먼트", use_container_width=True, key="pick_change_btn"):
                 st.session_state.pick_selected_shipment = None
+                st.session_state.pick_selected_shipments = []
                 st.rerun()
 
         pc1, pc2, pc3, pc4, pc5 = st.columns(5)
@@ -2699,7 +2753,7 @@ with tab8:
             st.markdown(
                 f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
                 unsafe_allow_html=True)
-            # 스캔 결과 소리
+            # 스캔 결과 소리 (비프음)
             sound_js = {
                 "ok": "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);",
                 "error": "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);",
@@ -2707,9 +2761,37 @@ with tab8:
                 "shortage": "o.frequency.value=600;g.gain.value=0.3;o.start();setTimeout(()=>{o.frequency.value=400},100);setTimeout(()=>g.gain.value=0,250);setTimeout(()=>o.stop(),300);",
             }
             js_code = sound_js.get(r["status"], sound_js["ok"])
+
+            # 음성 안내 (한국어 TTS)
+            box_label = r.get("박스", "")
+            if r["status"] == "error":
+                speak_text = "없는 상품 입니다"
+            elif r["status"] == "over":
+                speak_text = "수량 초과"
+            elif r["status"] == "shortage":
+                speak_text = f"{box_label} 입니다 재고 부족" if box_label else "재고 부족"
+            elif box_label:
+                speak_text = f"{box_label} 입니다"
+            else:
+                speak_text = "확인"
+
+            # JS 문자열 안전 이스케이프
+            speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
+
             from streamlit.components.v1 import html as st_html
             st_html(f"""<script>
             try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
+            try{{
+                var u = new SpeechSynthesisUtterance('{speak_text_js}');
+                u.lang = 'ko-KR';
+                u.rate = 1.3;
+                u.volume = 1.0;
+                var voices = window.speechSynthesis.getVoices();
+                var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                if (koVoice) u.voice = koVoice;
+                window.speechSynthesis.cancel();
+                setTimeout(() => window.speechSynthesis.speak(u), 250);
+            }}catch(e){{}}
             </script>""", height=0)
 
         st.markdown("---")
@@ -2722,9 +2804,12 @@ with tab8:
             elif s > 0: status_txt = f"🔄 {s}/{n}"
             else: status_txt = "⬜ 대기"
             inv = info.get("배대지잔여")
+            ship_boxes = info.get("쉽먼트박스목록", [])
+            ship_box_str = ",".join(ship_boxes) if ship_boxes else ""
             rows.append({
                 "상태": status_txt, "바코드": bc,
                 "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
+                "쉽먼트박스": ship_box_str,
                 "필요": n, "스캔": s, "남은": max(0, n - s),
                 "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
                 "배대지재고": f"{inv}" if inv is not None else "-",
