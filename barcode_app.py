@@ -1036,7 +1036,7 @@ def pick_get_progress():
     return {"total":total,"scanned":scanned,"skus":skus,"done_skus":done_skus,
             "pct":pct,"is_complete":scanned>=total,"over":over,"shortage":shortage}
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 검증'])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 검증', '📥 입고 분류'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -3020,3 +3020,228 @@ with tab8:
                 data=_pd.DataFrame(st.session_state.pick_scan_log).to_csv(index=False, encoding="utf-8-sig"),
                 file_name=f"picking_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                 mime="text/csv", use_container_width=True, key="pick_log_dl")
+
+
+# ══════════════════════════════════════════════════════
+# 탭9: 입고 분류 (배대지 박스 → 송장별로 나누기)
+# ══════════════════════════════════════════════════════
+with tab9:
+    import pandas as _pd2
+
+    st.header('📥 입고 분류')
+    st.caption('박스를 열며 바코드를 찍으면 어느 쉽먼트(박스)에 몇 개씩 들어갈지 알려줍니다')
+
+    # 출고지시서 데이터 사용 (피킹검증 탭에서 로드한 것 공유)
+    if st.session_state.pick_df_출고 is None:
+        st.warning('먼저 **📦 피킹 검증** 탭에서 구글 시트나 CSV로 출고지시서를 로드해주세요.')
+        st.stop()
+
+    df_sort = st.session_state.pick_df_출고
+
+    # 분류 진행 상태 초기화
+    if 'sort_state' not in st.session_state:
+        st.session_state.sort_state = {}  # barcode → {ship_id: {needed, sorted}}
+    if 'sort_scan_counter' not in st.session_state:
+        st.session_state.sort_scan_counter = 0
+    if 'sort_last_result' not in st.session_state:
+        st.session_state.sort_last_result = None
+
+    # 데이터 변경 감지: 새로 로드되거나 비어있으면 sort_state 초기화
+    def _build_sort_state():
+        state = {}
+        for _, row in df_sort.iterrows():
+            bc = str(row.get('바코드', '')).strip()
+            ship = str(row.get('쉽먼트운송장번호', '')).strip()
+            qty = int(row.get('수량', 0) or 0)
+            name = str(row.get('상품명', '')).strip()
+            if not bc or not ship or qty <= 0:
+                continue
+            if bc not in state:
+                state[bc] = {'상품명': name, 'shipments': {}}
+            ent = state[bc]['shipments'].setdefault(ship, {'needed': 0, 'sorted': 0})
+            ent['needed'] += qty
+        return state
+
+    sc_top1, sc_top2, sc_top3 = st.columns([2, 1, 1])
+    with sc_top1:
+        st.markdown(f'**총 SKU**: {len(st.session_state.sort_state)}종 / 출고지시서 {len(df_sort)}행')
+    with sc_top2:
+        if st.button('🔄 분류 초기화', use_container_width=True, key='sort_reset'):
+            st.session_state.sort_state = _build_sort_state()
+            st.session_state.sort_last_result = None
+            st.session_state.sort_scan_counter = 0
+            st.rerun()
+    with sc_top3:
+        if not st.session_state.sort_state:
+            if st.button('▶️ 분류 시작', type='primary', use_container_width=True, key='sort_start'):
+                st.session_state.sort_state = _build_sort_state()
+                st.rerun()
+
+    if not st.session_state.sort_state:
+        st.info('▶️ 분류 시작 버튼을 눌러주세요.')
+        st.stop()
+
+    # 진행률 메트릭
+    total_needed = sum(s['needed'] for v in st.session_state.sort_state.values() for s in v['shipments'].values())
+    total_sorted = sum(s['sorted'] for v in st.session_state.sort_state.values() for s in v['shipments'].values())
+    sm1, sm2, sm3 = st.columns(3)
+    sm1.metric('전체 분류', f'{total_sorted}/{total_needed}')
+    sm2.metric('진행률', f'{(total_sorted/total_needed*100 if total_needed else 0):.0f}%')
+    sm3.metric('남은 SKU', sum(1 for v in st.session_state.sort_state.values()
+                              if any(s['sorted'] < s['needed'] for s in v['shipments'].values())))
+    st.progress(total_sorted / total_needed if total_needed else 0)
+
+    st.markdown('---')
+
+    # 바코드 스캔 입력
+    sort_scan_key = f"sort_scan_{st.session_state.sort_scan_counter}"
+    sort_scanned = st.text_input(
+        '🔫 분류용 바코드 스캔',
+        key=sort_scan_key,
+        placeholder='박스에서 꺼낸 상품의 바코드를 스캔하세요',
+    )
+
+    def _process_sort_scan(bc):
+        bc = bc.strip()
+        if bc not in st.session_state.sort_state:
+            return {'status': 'error', 'message': f'🚨 출고지시서에 없는 바코드: {bc}', 'barcode': bc, '상품명': ''}
+        item = st.session_state.sort_state[bc]
+        # 가장 부족한(아직 채워야 할) 쉽먼트를 우선 자동 할당
+        candidates = [(sid, info) for sid, info in item['shipments'].items() if info['sorted'] < info['needed']]
+        if not candidates:
+            return {'status': 'over', 'message': f"⚠️ 이 상품은 모두 분류 완료: {item['상품명'][:30]}", 'barcode': bc, '상품명': item['상품명']}
+        # 부족분이 가장 큰 쉽먼트로 자동 할당
+        candidates.sort(key=lambda x: -(x[1]['needed'] - x[1]['sorted']))
+        target_ship, target_info = candidates[0]
+        target_info['sorted'] += 1
+        # 송장 인덱스 (1번박스, 2번박스 ...)
+        ship_keys = list(item['shipments'].keys())
+        ship_idx = ship_keys.index(target_ship) + 1
+        return {
+            'status': 'ok',
+            'barcode': bc,
+            '상품명': item['상품명'],
+            'target_ship': target_ship,
+            'ship_idx': ship_idx,
+            'remaining_at_ship': target_info['needed'] - target_info['sorted'],
+            'all_shipments': item['shipments'],
+        }
+
+    if sort_scanned:
+        st.session_state.sort_last_result = _process_sort_scan(sort_scanned)
+        st.session_state.sort_scan_counter += 1
+        st.rerun()
+
+    # 자동 포커스
+    from streamlit.components.v1 import html as _sort_html
+    _sort_html("""<script>
+    (function(){
+        const doc = window.parent.document;
+        function findScan(){
+            const inputs = doc.querySelectorAll('input[type="text"]');
+            for (const inp of inputs){
+                if (inp.placeholder && inp.placeholder.includes('박스에서 꺼낸')) return inp;
+            }
+            return null;
+        }
+        function focusScan(){
+            const inp = findScan();
+            if (inp && doc.activeElement !== inp) inp.focus();
+        }
+        focusScan();
+        if (window._sortFocusInterval) clearInterval(window._sortFocusInterval);
+        window._sortFocusInterval = setInterval(focusScan, 300);
+    })();
+    </script>""", height=0)
+
+    # 결과 표시 + 음성
+    r = st.session_state.sort_last_result
+    if r:
+        if r['status'] == 'error':
+            st.markdown(f'<div class="scan-error"><strong style="font-size:1.2rem;">{r["message"]}</strong></div>', unsafe_allow_html=True)
+            speak = '없는 상품 입니다'
+        elif r['status'] == 'over':
+            st.markdown(f'<div class="scan-warning"><strong style="font-size:1.2rem;">{r["message"]}</strong></div>', unsafe_allow_html=True)
+            speak = '분류 완료된 상품'
+        else:
+            _KOR = {'1':'일','2':'이','3':'삼','4':'사','5':'오','6':'육','7':'칠','8':'팔','9':'구','10':'십'}
+            kor_idx = _KOR.get(str(r['ship_idx']), str(r['ship_idx']))
+            ship_short = r['target_ship'][-6:]
+            # 다른 쉽먼트에도 필요한지
+            ships_needing = [sid for sid, info in r['all_shipments'].items() if info['sorted'] < info['needed']]
+            extra = ''
+            if len(ships_needing) > 1:
+                extra = f' (다른 박스도 필요: {len(ships_needing)-1}곳)'
+            st.markdown(
+                f'<div class="scan-ok"><strong style="font-size:1.3rem;">✅ {kor_idx}번박스 → {r["상품명"][:30]}</strong><br>'
+                f'송장 {ship_short} | 남은 수량: {r["remaining_at_ship"]}개{extra}</div>',
+                unsafe_allow_html=True)
+            speak = f'{kor_idx}번박스'
+
+        # 음성 안내
+        speak_js = speak.replace("'", "\\'").replace('"', '\\"')
+        scan_id_s = st.session_state.sort_scan_counter
+        beep_js = "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);"
+        if r['status'] == 'error':
+            beep_js = "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);"
+        elif r['status'] == 'over':
+            beep_js = "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);"
+        _sort_html(f"""<script>
+        // sort_id={scan_id_s}
+        try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
+        try{{
+            window.speechSynthesis.cancel();
+            setTimeout(function(){{
+                var u = new SpeechSynthesisUtterance('{speak_js}');
+                u.lang='ko-KR'; u.rate=1.3; u.volume=1.0;
+                var v = window.speechSynthesis.getVoices().find(x => x.lang && x.lang.startsWith('ko'));
+                if(v) u.voice=v;
+                window.speechSynthesis.speak(u);
+            }}, 100);
+        }}catch(e){{}}
+        </script>""", height=0)
+
+    st.markdown('---')
+    st.subheader('📋 쉽먼트별 분류 현황')
+
+    # 쉽먼트별로 집계
+    ship_summary = {}
+    for bc, item in st.session_state.sort_state.items():
+        for sid, info in item['shipments'].items():
+            ent = ship_summary.setdefault(sid, {'needed': 0, 'sorted': 0, 'sku_total': 0, 'sku_done': 0})
+            ent['needed'] += info['needed']
+            ent['sorted'] += info['sorted']
+            ent['sku_total'] += 1
+            if info['sorted'] >= info['needed']:
+                ent['sku_done'] += 1
+
+    rows = []
+    for i, (sid, ent) in enumerate(sorted(ship_summary.items()), start=1):
+        pct = (ent['sorted'] / ent['needed'] * 100) if ent['needed'] else 0
+        status = '✅ 완료' if ent['sorted'] >= ent['needed'] else f'🔄 {pct:.0f}%'
+        rows.append({
+            '박스': f'{i}번박스',
+            '송장(끝6자리)': sid[-6:],
+            '상태': status,
+            'SKU완료': f'{ent["sku_done"]}/{ent["sku_total"]}',
+            '수량': f'{ent["sorted"]}/{ent["needed"]}',
+        })
+    st.dataframe(_pd2.DataFrame(rows), use_container_width=True, hide_index=True,
+                 height=min(500, len(rows) * 38 + 40))
+
+    # 미완료 SKU 확장
+    incomplete = []
+    for bc, item in st.session_state.sort_state.items():
+        for sid, info in item['shipments'].items():
+            if info['sorted'] < info['needed']:
+                incomplete.append({
+                    '바코드': bc,
+                    '상품명': item['상품명'][:35],
+                    '송장(끝6)': sid[-6:],
+                    '필요': info['needed'],
+                    '분류됨': info['sorted'],
+                    '남음': info['needed'] - info['sorted'],
+                })
+    if incomplete:
+        with st.expander(f'⏳ 미분류 항목 ({len(incomplete)}건)', expanded=False):
+            st.dataframe(_pd2.DataFrame(incomplete), use_container_width=True, hide_index=True)
