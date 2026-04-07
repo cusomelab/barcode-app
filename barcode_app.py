@@ -724,7 +724,7 @@ def pick_clean_배대지(df):
 def pick_init_session():
     defaults = {
         "pick_df_출고": None, "pick_df_배대지": None,
-        "pick_selected_shipment": None, "pick_selected_shipments": [], "pick_picking_state": {},
+        "pick_selected_shipment": None, "pick_selected_shipments": [], "pick_show_add_input": False, "pick_picking_state": {},
         "pick_inventory_state": {}, "pick_scan_log": [],
         "pick_last_scan_result": None, "pick_scan_counter": 0,
         "pick_completed_shipments": set(), "pick_shortage_items": [],
@@ -2523,6 +2523,17 @@ with tab8:
     )
 
     if pick_mode == "📊 구글 시트 (실시간)":
+        # 페이지 새로고침 시에도 유지되도록 query_params에서 복원
+        _qp = st.query_params
+        if 'pick_url_출고' not in st.session_state and _qp.get('pu'):
+            st.session_state['pick_url_출고'] = _qp.get('pu', '')
+        if 'pick_tab_출고' not in st.session_state and _qp.get('pt'):
+            st.session_state['pick_tab_출고'] = _qp.get('pt', '쉽먼트시트')
+        if 'pick_url_배대지' not in st.session_state and _qp.get('bu'):
+            st.session_state['pick_url_배대지'] = _qp.get('bu', '')
+        if 'pick_tab_배대지' not in st.session_state and _qp.get('bt'):
+            st.session_state['pick_tab_배대지'] = _qp.get('bt', '배대지입고리스트')
+
         st.markdown("##### 쉽먼트 시트 (출고지시서)")
         gs_col1, gs_col2 = st.columns([3, 1])
         with gs_col1:
@@ -2536,6 +2547,14 @@ with tab8:
             url_배대지 = st.text_input("구글 시트 URL", placeholder="비워두면 같은 시트 사용", key="pick_url_배대지")
         with gs_col4:
             tab_배대지 = st.text_input("탭 이름", value="배대지입고리스트", key="pick_tab_배대지")
+
+        # 입력값을 query_params에 저장 (새로고침 후 유지)
+        if url_출고:
+            st.query_params['pu'] = url_출고
+            st.query_params['pt'] = tab_출고
+        if url_배대지:
+            st.query_params['bu'] = url_배대지
+            st.query_params['bt'] = tab_배대지
 
         # 배대지 URL 비어있으면 출고지시서 URL 사용
         if not url_배대지.strip() and url_출고.strip():
@@ -2669,7 +2688,7 @@ with tab8:
         progress = pick_get_progress()
         shipment_id = st.session_state.pick_selected_shipment
 
-        hcol1, hcol2 = st.columns([4, 1])
+        hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
         with hcol1:
             item0 = list(st.session_state.pick_picking_state.values())[0] if st.session_state.pick_picking_state else {}
             ships = st.session_state.get('pick_selected_shipments', [shipment_id])
@@ -2679,10 +2698,54 @@ with tab8:
             else:
                 st.markdown(f"**쉽먼트:** `{shipment_id}` | **센터:** {item0.get('물류센터','')} | **회차:** {item0.get('회차기호','')}")
         with hcol2:
+            if st.button("➕ 쉽먼트 추가", use_container_width=True, key="pick_add_btn"):
+                st.session_state.pick_show_add_input = True
+                st.rerun()
+        with hcol3:
             if st.button("🔄 다른 쉽먼트", use_container_width=True, key="pick_change_btn"):
                 st.session_state.pick_selected_shipment = None
                 st.session_state.pick_selected_shipments = []
+                # 입력칸 초기화
+                for k in ('pick_shipment_input', 'pick_add_shipment_input'):
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.session_state.pick_show_add_input = False
                 st.rerun()
+
+        # 쉽먼트 추가 입력 영역
+        if st.session_state.get('pick_show_add_input'):
+            with st.container():
+                ac1, ac2, ac3 = st.columns([3, 1, 1])
+                with ac1:
+                    add_input = st.text_input("추가할 송장번호", key="pick_add_shipment_input",
+                                              placeholder="송장번호 입력 후 추가 클릭")
+                with ac2:
+                    if st.button("✅ 추가", use_container_width=True, key="pick_add_confirm"):
+                        target = (add_input or '').strip()
+                        if target:
+                            valid_ids = list(st.session_state.pick_df_출고["쉽먼트운송장번호"].unique())
+                            resolved = None
+                            if target in valid_ids:
+                                resolved = target
+                            else:
+                                matches = [s for s in valid_ids if s.endswith(target)]
+                                if len(matches) == 1:
+                                    resolved = matches[0]
+                            if resolved and resolved not in ships:
+                                new_ships = list(ships) + [resolved]
+                                pick_init_picking(new_ships)
+                                st.session_state.pick_show_add_input = False
+                                if 'pick_add_shipment_input' in st.session_state:
+                                    del st.session_state['pick_add_shipment_input']
+                                st.rerun()
+                            elif resolved in ships:
+                                st.warning("이미 추가된 송장입니다")
+                            else:
+                                st.error(f"'{target}' 송장을 찾을 수 없습니다")
+                with ac3:
+                    if st.button("❌ 취소", use_container_width=True, key="pick_add_cancel"):
+                        st.session_state.pick_show_add_input = False
+                        st.rerun()
 
         pc1, pc2, pc3, pc4, pc5 = st.columns(5)
         pc1.metric("스캔", f"{progress['scanned']}/{progress['total']}")
@@ -2776,12 +2839,18 @@ with tab8:
                 return f"{kor}번박스"
             box_kor = _kor_box(box_label)
 
+            ships_count = len(st.session_state.get('pick_selected_shipments', []))
             if r["status"] == "error":
                 speak_text = "없는 상품 입니다"
             elif r["status"] == "over":
                 speak_text = "수량 초과"
             elif r["status"] == "shortage":
-                speak_text = f"{box_kor} 재고 부족" if box_kor else "재고 부족"
+                if ships_count <= 1:
+                    speak_text = "입고완료 재고 부족"
+                else:
+                    speak_text = f"{box_kor} 재고 부족" if box_kor else "재고 부족"
+            elif ships_count <= 1:
+                speak_text = "입고완료"
             elif box_kor:
                 speak_text = f"{box_kor}"
             else:
