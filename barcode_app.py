@@ -2658,17 +2658,39 @@ with tab8:
         # 바코드 입력창에 자동 포커스 유지
         from streamlit.components.v1 import html as _st_html
         _st_html("""<script>
-        function focusScan() {
-            const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-            for (const inp of inputs) {
-                if (inp.placeholder && inp.placeholder.includes('스캐너')) {
+        (function(){
+            const doc = window.parent.document;
+            function findScanInput() {
+                const inputs = doc.querySelectorAll('input[type="text"]');
+                for (const inp of inputs) {
+                    if (inp.placeholder && inp.placeholder.includes('스캐너')) {
+                        return inp;
+                    }
+                }
+                return null;
+            }
+            function focusScan() {
+                const inp = findScanInput();
+                if (inp && doc.activeElement !== inp) {
                     inp.focus();
-                    return;
                 }
             }
-        }
-        focusScan();
-        setInterval(focusScan, 1500);
+            // 즉시 포커스
+            focusScan();
+            // 짧은 간격으로 반복 (0.3초)
+            if (window._scanFocusInterval) clearInterval(window._scanFocusInterval);
+            window._scanFocusInterval = setInterval(focusScan, 300);
+            // DOM 변경 감지 시에도 포커스
+            if (window._scanObserver) window._scanObserver.disconnect();
+            window._scanObserver = new MutationObserver(focusScan);
+            window._scanObserver.observe(doc.body, {childList: true, subtree: true});
+            // 다른 곳 클릭해도 입력창으로 복귀 (단, 버튼/링크 제외)
+            doc.addEventListener('click', function(e){
+                const tag = (e.target.tagName||'').toLowerCase();
+                if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return;
+                setTimeout(focusScan, 50);
+            }, true);
+        })();
         </script>""", height=0)
 
         r = st.session_state.pick_last_scan_result
