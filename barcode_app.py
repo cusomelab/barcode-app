@@ -2432,59 +2432,71 @@ with tab6:
                     progress.progress(1.0)
                     status.text('✅ 완료!')
 
-                    # ===== 결과 표시 =====
-                    st.divider()
-                    st.subheader('📋 처리 결과')
-                    st.markdown(f"""
-| 구분 | 페이지 |
-|------|--------|
-| 출고지시서 + 매니페스트 (교차) | {total_pages - label_total}p |
-| 라벨 4분할 | {label_total}p |
-| **전체 합계** | **{total_pages}p** |
-""")
-                    st.caption('순서: [출고지시서→매니페스트→라벨] 송장번호순 통합 배치')
-
-                    st.divider()
-
-                    # ── 다운로드 버튼 3개 ────────────────────
-                    today = datetime.now().strftime('%Y%m%d_%H%M')
-
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        st.download_button(
-                            label=f'⬇️ 전체 통합 PDF ({total_pages}p)',
-                            data=final_buf,
-                            file_name=f'shipment_ALL_merged_{today}.pdf',
-                            mime='application/pdf',
-                            key='ship_dl_all',
-                            type='primary'
-                        )
-
-                    with col_b:
-                        shipment_only_buf.seek(0)
-                        st.download_button(
-                            label=f'⬇️ 쉽먼트만 ({shipment_only_pages}p)',
-                            data=shipment_only_buf,
-                            file_name=f'shipment_only_{today}.pdf',
-                            mime='application/pdf',
-                            key='ship_dl_shipment'
-                        )
-
-                    with col_c:
-                        if so_pdf_buf:
-                            so_pdf_buf.seek(0)
-                            st.download_button(
-                                label=f'⬇️ 출고지시서만 ({so_pages}p)',
-                                data=so_pdf_buf,
-                                file_name=f'출고지시서_{today}.pdf',
-                                mime='application/pdf',
-                                key='ship_dl_so'
-                            )
+                    # 결과를 session_state에 저장 (다운로드 버튼 클릭 후에도 유지)
+                    st.session_state.shipment_result = {
+                        'final_bytes': final_buf.getvalue(),
+                        'shipment_only_bytes': shipment_only_buf.getvalue(),
+                        'so_bytes': so_pdf_buf.getvalue() if so_pdf_buf else None,
+                        'total_pages': total_pages,
+                        'label_total': label_total,
+                        'shipment_only_pages': shipment_only_pages,
+                        'so_pages': so_pages,
+                        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+                    }
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
                     import traceback
                     st.code(traceback.format_exc())
+
+        # ===== 결과 표시 (session_state에서 읽어 버튼 유지) =====
+        if 'shipment_result' in st.session_state:
+            sres = st.session_state.shipment_result
+            st.divider()
+            st.subheader('📋 처리 결과')
+            st.markdown(f"""
+| 구분 | 페이지 |
+|------|--------|
+| 출고지시서 + 매니페스트 (교차) | {sres['total_pages'] - sres['label_total']}p |
+| 라벨 4분할 | {sres['label_total']}p |
+| **전체 합계** | **{sres['total_pages']}p** |
+""")
+            st.caption('순서: [출고지시서→매니페스트→라벨] 송장번호순 통합 배치')
+
+            st.divider()
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.download_button(
+                    label=f"⬇️ 전체 통합 PDF ({sres['total_pages']}p)",
+                    data=sres['final_bytes'],
+                    file_name=f"shipment_ALL_merged_{sres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='ship_dl_all',
+                    type='primary',
+                    use_container_width=True,
+                )
+
+            with col_b:
+                st.download_button(
+                    label=f"⬇️ 쉽먼트만 ({sres['shipment_only_pages']}p)",
+                    data=sres['shipment_only_bytes'],
+                    file_name=f"shipment_only_{sres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='ship_dl_shipment',
+                    use_container_width=True,
+                )
+
+            with col_c:
+                if sres['so_bytes']:
+                    st.download_button(
+                        label=f"⬇️ 출고지시서만 ({sres['so_pages']}p)",
+                        data=sres['so_bytes'],
+                        file_name=f"출고지시서_{sres['timestamp']}.pdf",
+                        mime='application/pdf',
+                        key='ship_dl_so',
+                        use_container_width=True,
+                    )
 
 # ── 쉽먼트 재출력 탭 ──────────────────────────────────────
 with tab7:
@@ -2735,58 +2747,69 @@ with tab7:
                     rp_progress.progress(1.0)
                     rp_status.text('✅ 완료!')
 
-                    # ===== 결과 표시 =====
-                    st.divider()
-                    st.subheader('📋 재출력 결과')
-                    st.markdown(f"""
-| 구분 | 수량 |
-|------|------|
-| 매칭된 송장 | {len(matched)}건 |
-| 출고지시서 | {rp_so_total}p |
-| 쉽먼트 (매니페스트+라벨) | {rp_shipment_total}p |
-| **전체 합계** | **{rp_total}p** |
-""")
-                    st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
-
-                    st.divider()
-
-                    today = datetime.now().strftime('%Y%m%d_%H%M')
-                    rp_col_a, rp_col_b, rp_col_c = st.columns(3)
-                    with rp_col_a:
-                        st.download_button(
-                            label=f'⬇️ 전체 통합 PDF ({rp_total}p)',
-                            data=rp_final_buf,
-                            file_name=f'shipment_reprint_ALL_{today}.pdf',
-                            mime='application/pdf',
-                            key='reprint_dl',
-                            type='primary',
-                            use_container_width=True,
-                        )
-                    with rp_col_b:
-                        rp_shipment_only_buf.seek(0)
-                        st.download_button(
-                            label=f'⬇️ 쉽먼트만 ({rp_shipment_total}p)',
-                            data=rp_shipment_only_buf,
-                            file_name=f'shipment_reprint_shipment_{today}.pdf',
-                            mime='application/pdf',
-                            key='reprint_dl_shipment',
-                            use_container_width=True,
-                        )
-                    with rp_col_c:
-                        rp_so_only_buf.seek(0)
-                        st.download_button(
-                            label=f'⬇️ 출고지시서만 ({rp_so_total}p)',
-                            data=rp_so_only_buf,
-                            file_name=f'shipment_reprint_so_{today}.pdf',
-                            mime='application/pdf',
-                            key='reprint_dl_so',
-                            use_container_width=True,
-                        )
+                    # 결과를 session_state에 저장 (다운로드 버튼 클릭 후에도 유지)
+                    st.session_state.reprint_result = {
+                        'final_bytes': rp_final_buf.getvalue(),
+                        'shipment_only_bytes': rp_shipment_only_buf.getvalue(),
+                        'so_only_bytes': rp_so_only_buf.getvalue(),
+                        'total': rp_total,
+                        'shipment_total': rp_shipment_total,
+                        'so_total': rp_so_total,
+                        'matched': len(matched),
+                        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+                    }
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
                     import traceback
                     st.code(traceback.format_exc())
+
+        # ===== 결과 표시 (session_state에서 읽어 버튼 유지) =====
+        if 'reprint_result' in st.session_state:
+            res = st.session_state.reprint_result
+            st.divider()
+            st.subheader('📋 재출력 결과')
+            st.markdown(f"""
+| 구분 | 수량 |
+|------|------|
+| 매칭된 송장 | {res['matched']}건 |
+| 출고지시서 | {res['so_total']}p |
+| 쉽먼트 (매니페스트+라벨) | {res['shipment_total']}p |
+| **전체 합계** | **{res['total']}p** |
+""")
+            st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
+
+            st.divider()
+
+            rp_col_a, rp_col_b, rp_col_c = st.columns(3)
+            with rp_col_a:
+                st.download_button(
+                    label=f"⬇️ 전체 통합 PDF ({res['total']}p)",
+                    data=res['final_bytes'],
+                    file_name=f"shipment_reprint_ALL_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl',
+                    type='primary',
+                    use_container_width=True,
+                )
+            with rp_col_b:
+                st.download_button(
+                    label=f"⬇️ 쉽먼트만 ({res['shipment_total']}p)",
+                    data=res['shipment_only_bytes'],
+                    file_name=f"shipment_reprint_shipment_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl_shipment',
+                    use_container_width=True,
+                )
+            with rp_col_c:
+                st.download_button(
+                    label=f"⬇️ 출고지시서만 ({res['so_total']}p)",
+                    data=res['so_only_bytes'],
+                    file_name=f"shipment_reprint_so_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl_so',
+                    use_container_width=True,
+                )
 
 # ══════════════════════════════════════════════════════
 # 탭8: 피킹 검증 시스템
