@@ -657,6 +657,8 @@ def create_box_labels_pdf(box_entries):
     LEFT_MARGIN = (210 * _mm - COLS * LABEL_W) / 2
     TOP_MARGIN = (297 * _mm - ROWS * LABEL_H) / 2
 
+    from reportlab.lib.utils import ImageReader as _ImageReader
+
     buf = io.BytesIO()
     c = _canvas.Canvas(buf, pagesize=_A4)
     page_w, page_h = _A4
@@ -694,26 +696,49 @@ def create_box_labels_pdf(box_entries):
 
         # 라벨 레이아웃:
         # ┌─────────────────────┐
-        # │  대                 │
-        # │      1번            │
-        # │             65개   │
+        # │ 대   1번    65개    │  ← 상단: 정보
+        # │ |||||||||||||||||   │  ← 중하단: 바코드
         # └─────────────────────┘
 
-        # 좌측 상단: 사이즈 (큰 글씨)
+        # 상단 좌측: 사이즈
         if size_char:
-            c.setFont('NanumBold', 14)
-            c.drawString(x + LABEL_W * 0.08, y + LABEL_H * 0.55, size_char)
+            c.setFont('NanumBold', 11)
+            c.drawString(x + LABEL_W * 0.05, y + LABEL_H * 0.68, size_char)
 
-        # 중앙: 박스 번호 (가장 큰 글씨)
-        c.setFont('NanumBold', 24)
-        c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.32,
+        # 상단 중앙: 박스 번호 (가장 큰 글씨)
+        c.setFont('NanumBold', 16)
+        c.drawCentredString(x + LABEL_W * 0.48, y + LABEL_H * 0.66,
                             f'{box_num}번')
 
-        # 우측 하단: 수량 (작게)
+        # 상단 우측: 수량
         if qty is not None:
             c.setFont('NanumReg', 7)
-            c.drawRightString(x + LABEL_W - LABEL_W * 0.08,
-                              y + LABEL_H * 0.1, f'{qty}개')
+            c.drawRightString(x + LABEL_W - LABEL_W * 0.05,
+                              y + LABEL_H * 0.72, f'{qty}개')
+
+        # 중하단: Code128 바코드 (#N 형식)
+        try:
+            barcode_text = f'#{box_num}'
+            bc_img = get_barcode_img(barcode_text, write_text=False)
+            bc_buf = io.BytesIO()
+            bc_img.save(bc_buf, format='PNG')
+            bc_buf.seek(0)
+            bc_w = LABEL_W * 0.85
+            bc_h = LABEL_H * 0.42
+            c.drawImage(
+                _ImageReader(bc_buf),
+                x + (LABEL_W - bc_w) / 2,
+                y + LABEL_H * 0.1,
+                width=bc_w,
+                height=bc_h,
+                preserveAspectRatio=False,
+                mask='auto',
+            )
+            # 바코드 아래 텍스트
+            c.setFont('NanumReg', 6)
+            c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.02, barcode_text)
+        except Exception:
+            pass
 
     c.save()
     buf.seek(0)
@@ -3362,40 +3387,93 @@ with tab8:
             box_qty_map.items(),
             key=lambda x: (-box_priority.get(x[0], (0, ''))[0], x[0])
         )
-        box_options = [None] + [k for k, _ in recommended_boxes]
+        all_box_nums_sorted = [k for k, _ in recommended_boxes]
 
-        def _fmt_box_option(x):
-            if x is None:
-                return '전체 (박스 구분 없음)'
+        def _fmt_box_num(x):
             info = box_qty_map[x]
             size_lbl, size_emo = _box_size(info['total_qty'])
             ship_cnt = len(info['ships'])
             return f"{x}번 ({info['total_qty']}개 / {size_emo}{size_lbl} / 송장 {ship_cnt}개)"
 
-        sac1, sac2 = st.columns([3, 1])
-        with sac1:
-            active_box = st.selectbox(
-                '지금 열고 있는 배대지 박스를 선택하면 오류 방지',
-                options=box_options,
-                format_func=_fmt_box_option,
-                key='sort_active_box',
-                help='추천 순서: 수량 많고 배대지 박스 수 적은 송장이 있는 박스부터',
+        # 창고 수용력 + 자동 추천 박스 세트
+        sac0a, sac0b = st.columns([1, 3])
+        with sac0a:
+            capacity = st.number_input(
+                '창고 수용력',
+                min_value=1, max_value=20, value=3,
+                key='sort_capacity',
+                help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수',
             )
+
+        # 집합 커버 추천 (Greedy): 지정한 개수의 박스로 최대한 많은 송장 완성
+        def _recommend_box_set(target_count, already_committed=None):
+            ship_need = {s: set(stats['dapae_boxes']) for s, stats in ship_stats.items()}
+            committed = set(already_committed or [])
+            picks = []
+            available = set(box_qty_map.keys()) - committed
+            while len(picks) < target_count and available:
+                best = None
+                best_score = (-1, -1)
+                for box in available:
+                    trial = committed | set(picks) | {box}
+                    completed = sum(1 for need in ship_need.values() if need.issubset(trial))
+                    qty = box_qty_map[box]['total_qty']
+                    score = (completed, qty)
+                    if score > best_score:
+                        best_score = score
+                        best = box
+                if best is None:
+                    break
+                picks.append(best)
+                available.discard(best)
+            return picks
+
+        rec_set = _recommend_box_set(int(capacity))
+        if rec_set:
+            rec_set_sorted = sorted(rec_set)
+            ship_need_all = {s: set(stats['dapae_boxes']) for s, stats in ship_stats.items()}
+            completed_with_set = sum(
+                1 for need in ship_need_all.values() if need.issubset(set(rec_set))
+            )
+            with sac0b:
+                st.success(
+                    f'💡 **지금 열 박스 {int(capacity)}개**: '
+                    f'**{", ".join(str(b) + "번" for b in rec_set_sorted)}**  '
+                    f'→ 이것만 열면 **{completed_with_set}개 송장** 완성'
+                )
+
+        # ── 활성 박스 (멀티 선택) ──
+        if 'sort_active_boxes' not in st.session_state:
+            st.session_state.sort_active_boxes = []
+
+        sac1, sac2 = st.columns([4, 1])
+        with sac1:
+            active_boxes = st.multiselect(
+                '🎯 지금 열어놓은 배대지 박스 (바코드 #1, #2... 찍으면 자동 추가)',
+                options=all_box_nums_sorted,
+                format_func=_fmt_box_num,
+                default=st.session_state.sort_active_boxes,
+                key='sort_active_boxes_ms',
+                help='여러 박스를 동시에 선택 가능. 라벨의 #N 바코드를 찍으면 자동 토글',
+            )
+            # multiselect 변경 반영
+            st.session_state.sort_active_boxes = active_boxes
+
         with sac2:
-            if st.button('🔄 분류 초기화', key='sort_reset', use_container_width=True):
+            if st.button('🔄 초기화', key='sort_reset', use_container_width=True):
                 st.session_state.sort_state = _build_sort_state()
                 st.session_state.sort_scan_counter = 0
                 st.session_state.sort_last_result = None
+                st.session_state.sort_active_boxes = []
                 st.rerun()
 
-        if active_box is not None:
-            info = box_qty_map[active_box]
-            size_lbl, size_emo = _box_size(info['total_qty'])
-            st.info(
-                f'📦 **{active_box}번 박스** 작업 중 — '
-                f'{size_emo}{size_lbl}형 / {info["total_qty"]}개 / '
-                f'송장 {len(info["ships"])}개 — 이 박스 상품만 스캔 유효'
-            )
+        if active_boxes:
+            parts = []
+            for b in sorted(active_boxes):
+                info = box_qty_map[b]
+                size_lbl, size_emo = _box_size(info['total_qty'])
+                parts.append(f'{b}번({size_emo}{size_lbl},{info["total_qty"]}개)')
+            st.info(f'📦 활성 박스 {len(active_boxes)}개: ' + ' / '.join(parts))
 
         st.markdown('---')
 
@@ -3409,6 +3487,34 @@ with tab8:
 
         def _process_sort_scan(bc):
             bc = bc.strip()
+
+            # #N 바코드 → 박스 토글
+            import re as _re_bc
+            box_label_match = _re_bc.match(r'^#(\d+)$', bc)
+            if box_label_match:
+                bn = int(box_label_match.group(1))
+                if bn in box_qty_map:
+                    cur = list(st.session_state.get('sort_active_boxes', []))
+                    if bn in cur:
+                        cur.remove(bn)
+                        msg_suffix = '제외'
+                    else:
+                        cur.append(bn)
+                        msg_suffix = '선택'
+                    st.session_state.sort_active_boxes = cur
+                    info = box_qty_map[bn]
+                    size_lbl, size_emo = _box_size(info['total_qty'])
+                    return {
+                        'status': 'box_toggle',
+                        'barcode': bc,
+                        'box_num': bn,
+                        'message': f'📦 {bn}번 박스 {msg_suffix}',
+                        'detail': f'{size_emo}{size_lbl}형 · {info["total_qty"]}개 · 송장 {len(info["ships"])}개',
+                    }
+                else:
+                    return {'status': 'error', 'barcode': bc,
+                            'message': f'🚨 {bn}번 박스 없음', 'detail': bc}
+
             if bc not in sort_state:
                 return {'status': 'error', 'barcode': bc,
                         'message': '🚨 출고지시서에 없는 바코드',
@@ -3422,18 +3528,18 @@ with tab8:
                         'message': '⚠️ 이 상품은 모두 분류 완료',
                         'detail': item_data['상품명'][:35]}
 
-            # 시작 박스 지정 모드: 해당 박스의 상품만 유효
-            _active_box = st.session_state.get('sort_active_box')
-            if _active_box is not None:
+            # 활성 박스 집합 필터: 선택된 박스들 중에서만 유효
+            _active_boxes_set = set(st.session_state.get('sort_active_boxes', []))
+            if _active_boxes_set:
                 box_candidates = []
                 for it in candidates:
                     try:
-                        if int(str(it.get('box_num', '')).strip()) == _active_box:
+                        if int(str(it.get('box_num', '')).strip()) in _active_boxes_set:
                             box_candidates.append(it)
                     except (ValueError, TypeError):
                         pass
                 if not box_candidates:
-                    # 이 상품이 다른 박스에 있음
+                    # 이 상품이 활성 박스들에 없음 → 다른 박스에 있음
                     other_boxes = sorted(set(
                         str(it.get('box_num', ''))
                         for it in item_data['items']
@@ -3441,8 +3547,8 @@ with tab8:
                     ))
                     return {'status': 'wrong_box', 'barcode': bc,
                             '상품명': item_data['상품명'],
-                            'message': f'🚨 이 상품은 {_active_box}번 박스에 없습니다',
-                            'detail': f'다른 박스: {", ".join(other_boxes)}'}
+                            'message': f'🚨 활성 박스에 없는 상품',
+                            'detail': f'이 상품은 {", ".join(other_boxes)}번 박스에 있음'}
                 candidates = box_candidates
 
             target = candidates[0]
@@ -3521,7 +3627,16 @@ with tab8:
                     return t_str + (_KOR_NUMS_SORT.get(ones, '') if ones else '')
                 return str(n)
 
-            if r['status'] == 'error':
+            if r['status'] == 'box_toggle':
+                st.markdown(
+                    f'<div class="scan-complete" style="background:#3b82f6;color:white;padding:1.5rem;border-radius:10px;text-align:center;border-left:8px solid #1e40af">'
+                    f'<div style="font-size:1.8rem;font-weight:bold;">{r["message"]}</div>'
+                    f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.95;">{r["detail"]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+                _kor_bt = _box_to_kor(str(r['box_num']))
+                speak = f'{_kor_bt}번박스'
+            elif r['status'] == 'error':
                 st.markdown(
                     f'<div class="scan-error"><strong style="font-size:1.4rem;">📥 보류</strong><br>'
                     f'쉽먼트 정보 없음 - 따로 보관<br>{r["detail"]}</div>',
