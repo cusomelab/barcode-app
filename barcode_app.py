@@ -2655,9 +2655,13 @@ with tab7:
 
                     # ===== 5. 매칭된 송장만 필터링하여 통합 PDF 생성 =====
                     rp_status.text('📎 통합 PDF 생성 중...')
-                    rp_final_writer = PdfWriter()
+                    rp_final_writer = PdfWriter()          # 전체 통합
+                    rp_shipment_only_writer = PdfWriter()  # 쉽먼트만 (매니페스트 + 라벨)
+                    rp_so_only_writer = PdfWriter()        # 출고지시서만
                     rp_total = 0
                     rp_label_total = 0
+                    rp_shipment_total = 0
+                    rp_so_total = 0
 
                     # 송장별 라벨 그룹 매핑
                     rp_label_by_inv = {}
@@ -2680,21 +2684,25 @@ with tab7:
                             if inv not in matched:
                                 continue
 
-                            # 출고지시서
+                            # 출고지시서 (전체통합 + 출고지시서만)
                             if inv in rp_so_by_invoice:
                                 so_buf = rp_so_by_invoice[inv]
                                 so_buf.seek(0)
                                 so_reader = PdfReader(so_buf)
                                 for page in so_reader.pages:
                                     rp_final_writer.add_page(page)
+                                    rp_so_only_writer.add_page(page)
                                 rp_total += len(so_reader.pages)
+                                rp_so_total += len(so_reader.pages)
 
-                            # 매니페스트
+                            # 매니페스트 (전체통합 + 쉽먼트만)
                             for pidx in g['page_indices']:
                                 rp_final_writer.add_page(m_reader.pages[pidx])
+                                rp_shipment_only_writer.add_page(m_reader.pages[pidx])
                                 rp_total += 1
+                                rp_shipment_total += 1
 
-                            # 라벨
+                            # 라벨 (전체통합 + 쉽먼트만)
                             inv_key = inv or ''
                             if inv_key in rp_label_by_inv.get(sid, {}):
                                 inv_label_groups = rp_label_by_inv[sid].pop(inv_key)
@@ -2705,14 +2713,24 @@ with tab7:
                                     img_buf.seek(0)
                                     lp = PdfReader(img_buf)
                                     rp_final_writer.add_page(lp.pages[0])
+                                    rp_shipment_only_writer.add_page(lp.pages[0])
                                     rp_total += 1
                                     rp_label_total += 1
+                                    rp_shipment_total += 1
 
                     rp_progress.progress(0.9)
 
                     rp_final_buf = io.BytesIO()
                     rp_final_writer.write(rp_final_buf)
                     rp_final_buf.seek(0)
+
+                    rp_shipment_only_buf = io.BytesIO()
+                    rp_shipment_only_writer.write(rp_shipment_only_buf)
+                    rp_shipment_only_buf.seek(0)
+
+                    rp_so_only_buf = io.BytesIO()
+                    rp_so_only_writer.write(rp_so_only_buf)
+                    rp_so_only_buf.seek(0)
 
                     rp_progress.progress(1.0)
                     rp_status.text('✅ 완료!')
@@ -2724,8 +2742,8 @@ with tab7:
 | 구분 | 수량 |
 |------|------|
 | 매칭된 송장 | {len(matched)}건 |
-| 출고지시서 + 매니페스트 | {rp_total - rp_label_total}p |
-| 라벨 4분할 | {rp_label_total}p |
+| 출고지시서 | {rp_so_total}p |
+| 쉽먼트 (매니페스트+라벨) | {rp_shipment_total}p |
 | **전체 합계** | **{rp_total}p** |
 """)
                     st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
@@ -2733,14 +2751,37 @@ with tab7:
                     st.divider()
 
                     today = datetime.now().strftime('%Y%m%d_%H%M')
-                    st.download_button(
-                        label=f'⬇️ 재출력 통합 PDF ({rp_total}p)',
-                        data=rp_final_buf,
-                        file_name=f'shipment_reprint_{today}.pdf',
-                        mime='application/pdf',
-                        key='reprint_dl',
-                        type='primary'
-                    )
+                    rp_col_a, rp_col_b, rp_col_c = st.columns(3)
+                    with rp_col_a:
+                        st.download_button(
+                            label=f'⬇️ 전체 통합 PDF ({rp_total}p)',
+                            data=rp_final_buf,
+                            file_name=f'shipment_reprint_ALL_{today}.pdf',
+                            mime='application/pdf',
+                            key='reprint_dl',
+                            type='primary',
+                            use_container_width=True,
+                        )
+                    with rp_col_b:
+                        rp_shipment_only_buf.seek(0)
+                        st.download_button(
+                            label=f'⬇️ 쉽먼트만 ({rp_shipment_total}p)',
+                            data=rp_shipment_only_buf,
+                            file_name=f'shipment_reprint_shipment_{today}.pdf',
+                            mime='application/pdf',
+                            key='reprint_dl_shipment',
+                            use_container_width=True,
+                        )
+                    with rp_col_c:
+                        rp_so_only_buf.seek(0)
+                        st.download_button(
+                            label=f'⬇️ 출고지시서만 ({rp_so_total}p)',
+                            data=rp_so_only_buf,
+                            file_name=f'shipment_reprint_so_{today}.pdf',
+                            mime='application/pdf',
+                            key='reprint_dl_so',
+                            use_container_width=True,
+                        )
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
