@@ -3156,6 +3156,18 @@ with tab9:
                     'detail': item_data['상품명'][:35]}
         target = candidates[0]
         target['scanned'] += 1
+
+        # 이 박스(box_key)가 다 채워졌는지 확인
+        target_box_key = target['box_key']
+        box_complete = True
+        for _bc, _v in sort_state.items():
+            for _it in _v['items']:
+                if _it['box_key'] == target_box_key and _it['scanned'] < _it['needed']:
+                    box_complete = False
+                    break
+            if not box_complete:
+                break
+
         return {
             'status': 'ok',
             'barcode': bc,
@@ -3165,6 +3177,7 @@ with tab9:
             'sym': target['sym'],
             'ship': target['ship'],
             'remaining': target['needed'] - target['scanned'],
+            'box_complete': box_complete,
         }
 
     if sort_scanned:
@@ -3227,11 +3240,22 @@ with tab9:
             box_key = r['box_key']
             box_num_str = r['box_num']
             kor_n = _box_to_kor(box_num_str)
-            st.markdown(
-                f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_key}번박스 → {r["상품명"][:30]}</strong><br>'
-                f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
-                unsafe_allow_html=True)
-            speak = f'{kor_n}번박스'
+            if r.get('box_complete'):
+                # 박스 완료! 큰 알림 + 포장 안내
+                st.markdown(
+                    f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
+                    f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_key}번박스 완료!</div>'
+                    f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
+                    f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+                speak = f'{kor_n}번박스 완료. 포장하세요'
+            else:
+                st.markdown(
+                    f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_key}번박스 → {r["상품명"][:30]}</strong><br>'
+                    f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
+                    unsafe_allow_html=True)
+                speak = f'{kor_n}번박스'
 
         # 소리 + 음성
         speak_js = speak.replace("'", "\\'").replace('"', '\\"')
@@ -3241,6 +3265,13 @@ with tab9:
             beep_js = "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);"
         elif r['status'] == 'over':
             beep_js = "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);"
+        elif r.get('box_complete'):
+            # 박스 완료 - 축하 멜로디 (3음)
+            beep_js = ("o.frequency.value=523;g.gain.value=0.4;o.start();"
+                       "setTimeout(()=>{o.frequency.value=659},120);"
+                       "setTimeout(()=>{o.frequency.value=784},240);"
+                       "setTimeout(()=>g.gain.value=0,400);"
+                       "setTimeout(()=>o.stop(),500);")
         _sort_html(f"""<script>
         // sort_id={scan_id_s}
         try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
