@@ -3308,10 +3308,10 @@ with tab8:
 
         # ── 시작 박스 지정 (선택사항) ──
         st.markdown('### 🎯 작업할 배대지 박스')
-        # 추천 순서: 송장 수가 적은 박스부터 (빨리 완료)
+        # 추천 순서: 총 수량 많은 박스부터 (많이 처리해서 빨리 출고박스 완성)
         recommended_boxes = sorted(
             box_qty_map.items(),
-            key=lambda x: (len(x[1]['ships']), x[0])
+            key=lambda x: (-x[1]['total_qty'], x[0])
         )
         box_options = [None] + [k for k, _ in recommended_boxes]
 
@@ -3321,7 +3321,7 @@ with tab8:
             info = box_qty_map[x]
             size_lbl, size_emo = _box_size(info['total_qty'])
             ship_cnt = len(info['ships'])
-            return f"{x}번 ({size_emo}{size_lbl}, {info['total_qty']}개, 송장 {ship_cnt}개)"
+            return f"{x}번 ({info['total_qty']}개 / {size_emo}{size_lbl} / 송장 {ship_cnt}개)"
 
         sac1, sac2 = st.columns([3, 1])
         with sac1:
@@ -3330,7 +3330,7 @@ with tab8:
                 options=box_options,
                 format_func=_fmt_box_option,
                 key='sort_active_box',
-                help='추천 순서: 송장 수가 적은 박스부터 (빨리 완료되는 순)',
+                help='추천 순서: 수량이 많은 박스부터 (많이 처리해서 빨리 출고박스 완성)',
             )
         with sac2:
             if st.button('🔄 분류 초기화', key='sort_reset', use_container_width=True):
