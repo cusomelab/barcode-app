@@ -635,6 +635,75 @@ def create_shipment_barcodes_pdf(shipment_numbers):
     return buf
 
 
+def create_box_labels_pdf(box_entries):
+    """폼텍 3100 (38.1 x 21.2mm, 5열 13행 = 65칸/페이지) 라벨 PDF 생성
+
+    box_entries: [(box_num, total_qty, size_label), ...] 또는 [(box_num, info_text), ...]
+                 각 라벨에 표시할 박스 정보 리스트
+    """
+    from reportlab.pdfgen import canvas as _canvas
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.lib.units import mm as _mm
+
+    # 폼텍 3100 사양
+    LABEL_W = 38.1 * _mm
+    LABEL_H = 21.2 * _mm
+    COLS = 5
+    ROWS = 13
+    PER_PAGE = COLS * ROWS  # 65
+    # A4: 210 x 297mm
+    # 좌우 여백 계산: (210 - 5*38.1) / 2 = (210 - 190.5)/2 = 9.75mm
+    # 상하 여백 계산: (297 - 13*21.2) / 2 = (297 - 275.6)/2 = 10.7mm
+    LEFT_MARGIN = (210 * _mm - COLS * LABEL_W) / 2
+    TOP_MARGIN = (297 * _mm - ROWS * LABEL_H) / 2
+
+    buf = io.BytesIO()
+    c = _canvas.Canvas(buf, pagesize=_A4)
+    page_w, page_h = _A4
+
+    for idx, entry in enumerate(box_entries):
+        page_idx = idx // PER_PAGE
+        slot_idx = idx % PER_PAGE
+        if slot_idx == 0 and idx > 0:
+            c.showPage()
+
+        col = slot_idx % COLS
+        row = slot_idx // COLS
+        x = LEFT_MARGIN + col * LABEL_W
+        # 좌표 변환: PDF는 좌하단 원점, 라벨은 좌상단부터 채움
+        y_top = page_h - TOP_MARGIN - row * LABEL_H
+        y = y_top - LABEL_H
+
+        # 라벨 내용 파싱
+        if isinstance(entry, (tuple, list)):
+            box_num = str(entry[0])
+            qty = entry[1] if len(entry) > 1 else None
+            size_label = entry[2] if len(entry) > 2 else None
+        else:
+            box_num = str(entry)
+            qty = None
+            size_label = None
+
+        # 박스 번호 (큰 글씨)
+        c.setFont('NanumBold', 22)
+        c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.42,
+                            f'{box_num}번')
+        # 부가 정보 (작게)
+        info_parts = []
+        if size_label:
+            info_parts.append(size_label)
+        if qty is not None:
+            info_parts.append(f'{qty}개')
+        if info_parts:
+            c.setFont('NanumReg', 8)
+            c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.15,
+                                ' / '.join(info_parts))
+
+    c.save()
+    buf.seek(0)
+    return buf
+
+
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
@@ -3191,6 +3260,27 @@ with tab8:
             ]
             st.dataframe(_pd2.DataFrame(size_rows), use_container_width=True, hide_index=True)
             st.caption(f'💡 총 {len(all_box_keys)}개 박스 준비 ・ 박스 옆 괄호는 들어갈 총 수량')
+
+            # ── 폼텍 3100 라벨 PDF 다운로드 ──
+            label_entries = []
+            # 박스번호 → 사이즈 라벨 매핑
+            for key, info in sorted(box_qty_map.items(),
+                                    key=lambda x: int(x[1]['box_num']) if x[1]['box_num'].isdigit() else 0):
+                size_lbl, size_emoji = _box_size(info['total_qty'])
+                label_entries.append((info['box_num'], info['total_qty'], f'{size_emoji}{size_lbl}'))
+            try:
+                label_pdf_buf = create_box_labels_pdf(label_entries)
+                st.download_button(
+                    label=f'🏷️ 박스 라벨 PDF 다운로드 ({len(label_entries)}장 / 폼텍 3100)',
+                    data=label_pdf_buf,
+                    file_name=f'box_labels_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf',
+                    mime='application/pdf',
+                    key='sort_label_dl',
+                    use_container_width=True,
+                )
+                st.caption('📄 폼텍 3100 (38.1×21.2mm, A4 65칸) 라벨지에 출력하세요')
+            except Exception as _e:
+                st.caption(f'라벨 생성 오류: {_e}')
 
         if st.button('🔄 분류 초기화', key='sort_reset'):
             st.session_state.sort_state = _build_sort_state()
