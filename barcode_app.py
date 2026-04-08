@@ -357,14 +357,15 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
         bn_raw = str(it.get('boxNumber', '') or '').strip()
         if bn_raw and bn_raw not in box_nums_set:
             box_nums_set.append(bn_raw)
-    # ▲1(2), ▲2(5) 에서 ▲1, ▲2 같은 핵심 라벨만 추출
+    # ▲1(2), ▲2(5) 에서 숫자만 추출 (기호 ▲ 제거)
     import re as _re_bn
     box_labels = []
     for bn in box_nums_set:
-        m = _re_bn.match(r'^([^\d()]*\d+)', bn)
-        lbl = m.group(1) if m else bn
-        if lbl not in box_labels:
-            box_labels.append(lbl)
+        m = _re_bn.search(r'(\d+)', bn)
+        if m:
+            lbl = f'{m.group(1)}번'
+            if lbl not in box_labels:
+                box_labels.append(lbl)
     big_box_label = ' · '.join(box_labels) if box_labels else ''
 
     # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스(+바코드) ──────────
@@ -3237,14 +3238,13 @@ with tab9:
             st.markdown(f'<div class="scan-warning"><strong style="font-size:1.2rem;">{r["message"]}</strong><br>{r["detail"]}</div>', unsafe_allow_html=True)
             speak = '분류 완료'
         else:
-            box_key = r['box_key']
             box_num_str = r['box_num']
             kor_n = _box_to_kor(box_num_str)
             if r.get('box_complete'):
                 # 박스 완료! 큰 알림 + 포장 안내
                 st.markdown(
                     f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
-                    f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_key}번박스 완료!</div>'
+                    f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번박스 완료!</div>'
                     f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
                     f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
                     f'</div>',
@@ -3252,7 +3252,7 @@ with tab9:
                 speak = f'{kor_n}번박스 완료. 포장하세요'
             else:
                 st.markdown(
-                    f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_key}번박스 → {r["상품명"][:30]}</strong><br>'
+                    f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스 → {r["상품명"][:30]}</strong><br>'
                     f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
                     unsafe_allow_html=True)
                 speak = f'{kor_n}번박스'
@@ -3311,7 +3311,7 @@ with tab9:
         else:
             status = '⬜ 대기'
         prog_rows.append({
-            '박스': key,
+            '박스': f"{ent['box_num']}번",
             '상태': status,
             'SKU완료': f'{ent["sku_done"]}/{ent["sku_total"]}',
             '수량': f'{ent["scanned"]}/{ent["needed"]}',
@@ -3325,7 +3325,7 @@ with tab9:
         for it in v['items']:
             if it['scanned'] < it['needed']:
                 incomplete.append({
-                    '박스': it['box_key'],
+                    '박스': f"{it['box_num']}번",
                     '바코드': bc,
                     '상품명': v['상품명'][:35],
                     '필요': it['needed'],
