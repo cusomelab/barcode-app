@@ -3306,12 +3306,61 @@ with tab8:
             except Exception as _e:
                 st.caption(f'라벨 생성 오류: {_e}')
 
-        # ── 시작 박스 지정 (선택사항) ──
+        # ── 송장별 우선순위 계산 ──
+        # 핵심: 수량 많고 배대지 박스 수 적은 송장 = 빨리 완성 가능 = 우선순위 높음
+        ship_stats = {}  # ship_id → {qty, dapae_boxes: set, score}
+        for v in sort_state.values():
+            for it in v['items']:
+                ship = it.get('ship')
+                if not ship:
+                    continue
+                bn_raw = it.get('box_num')
+                if bn_raw is None:
+                    continue
+                bn_str = str(bn_raw).strip()
+                if not bn_str.isdigit():
+                    continue
+                bn_int = int(bn_str)
+                ent = ship_stats.setdefault(ship, {'qty': 0, 'dapae_boxes': set()})
+                ent['qty'] += it['needed']
+                ent['dapae_boxes'].add(bn_int)
+
+        # 송장 점수: 수량 / 배대지박스수 (수량당 효율)
+        for ship, stats in ship_stats.items():
+            stats['score'] = stats['qty'] / max(len(stats['dapae_boxes']), 1)
+
+        # 각 배대지 박스의 우선순위 = 그 박스에 포함된 최고 송장 점수
+        box_priority = {}  # box_num → (best_score, best_ship)
+        for ship, stats in ship_stats.items():
+            for bn in stats['dapae_boxes']:
+                if bn not in box_priority or box_priority[bn][0] < stats['score']:
+                    box_priority[bn] = (stats['score'], ship)
+
+        # 1순위 송장 찾기 (가장 높은 점수)
+        top_ship = None
+        top_stats = None
+        if ship_stats:
+            top_ship, top_stats = max(ship_stats.items(), key=lambda x: x[1]['score'])
+
+        # ── 시작 박스 지정 ──
         st.markdown('### 🎯 작업할 배대지 박스')
-        # 추천 순서: 총 수량 많은 박스부터 (많이 처리해서 빨리 출고박스 완성)
+
+        # 1순위 송장 기반 추천 박스 안내
+        if top_ship and top_stats:
+            top_boxes_sorted = sorted(top_stats['dapae_boxes'])
+            first_box = top_boxes_sorted[0] if top_boxes_sorted else None
+            if first_box:
+                st.success(
+                    f'🏆 **우선 작업 추천**: **{first_box}번 박스부터 열어주세요**\n\n'
+                    f'→ 송장 `{top_ship[-6:]}` ({top_stats["qty"]}개, '
+                    f'배대지 박스 {len(top_boxes_sorted)}개: '
+                    f'{", ".join(str(b)+"번" for b in top_boxes_sorted)}) 를 가장 빨리 완성 가능'
+                )
+
+        # 드롭다운 정렬: 박스 우선순위 점수 내림차순
         recommended_boxes = sorted(
             box_qty_map.items(),
-            key=lambda x: (-x[1]['total_qty'], x[0])
+            key=lambda x: (-box_priority.get(x[0], (0, ''))[0], x[0])
         )
         box_options = [None] + [k for k, _ in recommended_boxes]
 
@@ -3330,7 +3379,7 @@ with tab8:
                 options=box_options,
                 format_func=_fmt_box_option,
                 key='sort_active_box',
-                help='추천 순서: 수량이 많은 박스부터 (많이 처리해서 빨리 출고박스 완성)',
+                help='추천 순서: 수량 많고 배대지 박스 수 적은 송장이 있는 박스부터',
             )
         with sac2:
             if st.button('🔄 분류 초기화', key='sort_reset', use_container_width=True):
