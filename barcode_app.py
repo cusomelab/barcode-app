@@ -684,20 +684,36 @@ def create_box_labels_pdf(box_entries):
             qty = None
             size_label = None
 
-        # 박스 번호 (큰 글씨)
-        c.setFont('NanumBold', 22)
-        c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.42,
-                            f'{box_num}번')
-        # 부가 정보 (작게)
-        info_parts = []
+        # 사이즈 라벨에서 한글만 추출 (이모지 제거): 🟢대 → 대
+        size_char = ''
         if size_label:
-            info_parts.append(size_label)
+            for ch in size_label:
+                if ch in ('대', '중', '소'):
+                    size_char = ch
+                    break
+
+        # 라벨 레이아웃:
+        # ┌─────────────────────┐
+        # │  대                 │
+        # │      1번            │
+        # │             65개   │
+        # └─────────────────────┘
+
+        # 좌측 상단: 사이즈 (큰 글씨)
+        if size_char:
+            c.setFont('NanumBold', 14)
+            c.drawString(x + LABEL_W * 0.08, y + LABEL_H * 0.55, size_char)
+
+        # 중앙: 박스 번호 (가장 큰 글씨)
+        c.setFont('NanumBold', 24)
+        c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.32,
+                            f'{box_num}번')
+
+        # 우측 하단: 수량 (작게)
         if qty is not None:
-            info_parts.append(f'{qty}개')
-        if info_parts:
-            c.setFont('NanumReg', 8)
-            c.drawCentredString(x + LABEL_W / 2, y + LABEL_H * 0.15,
-                                ' / '.join(info_parts))
+            c.setFont('NanumReg', 7)
+            c.drawRightString(x + LABEL_W - LABEL_W * 0.08,
+                              y + LABEL_H * 0.1, f'{qty}개')
 
     c.save()
     buf.seek(0)
