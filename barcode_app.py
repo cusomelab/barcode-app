@@ -3111,19 +3111,84 @@ with tab9:
 
     sort_state = st.session_state.sort_state
 
+    # ── 박스별 총 수량 집계 (크기 분류용) ──
+    box_qty_map = {}  # box_key → {box_num, sym, total_qty}
+    for v in sort_state.values():
+        for it in v['items']:
+            key = it['box_key']
+            ent = box_qty_map.setdefault(key, {'box_num': it['box_num'], 'sym': it['sym'], 'total_qty': 0})
+            ent['total_qty'] += it['needed']
+
+    def _box_size(qty):
+        """수량 기준으로 박스 크기 분류"""
+        if qty >= 50:
+            return ('대', '🟢')
+        elif qty >= 30:
+            return ('중', '🟡')
+        else:
+            return ('소', '🔵')
+
+    # 박스 크기별 그룹
+    boxes_large = []  # [(box_num, qty)]
+    boxes_med = []
+    boxes_small = []
+    for key, info in box_qty_map.items():
+        size_label, _ = _box_size(info['total_qty'])
+        try:
+            bn_int = int(info['box_num'])
+        except (ValueError, TypeError):
+            bn_int = 0
+        entry = (bn_int, info['box_num'], info['total_qty'])
+        if size_label == '대':
+            boxes_large.append(entry)
+        elif size_label == '중':
+            boxes_med.append(entry)
+        else:
+            boxes_small.append(entry)
+    boxes_large.sort()
+    boxes_med.sort()
+    boxes_small.sort()
+
+    # 박스 크기 매핑 (스캔 결과 표시용)
+    box_size_lookup = {}  # box_key → (size_label, emoji)
+    for key, info in box_qty_map.items():
+        box_size_lookup[key] = _box_size(info['total_qty'])
+
     # ── 상단 요약 ──
     total_qty = sum(it['needed'] for v in sort_state.values() for it in v['items'])
     total_scanned = sum(it['scanned'] for v in sort_state.values() for it in v['items'])
-    all_box_keys = set()
-    for v in sort_state.values():
-        for it in v['items']:
-            all_box_keys.add(it['box_key'])
+    all_box_keys = set(box_qty_map.keys())
 
     hh1, hh2, hh3, hh4 = st.columns(4)
     hh1.metric('총 박스', f'{len(all_box_keys)}개')
     hh2.metric('총 SKU', f'{len(sort_state)}종')
     hh3.metric('스캔 진행', f'{total_scanned}/{total_qty}')
     hh4.metric('진행률', f'{(total_scanned/total_qty*100 if total_qty else 0):.0f}%')
+
+    # ── 박스 크기별 준비 안내 ──
+    with st.expander('📦 박스 준비 안내 (크기별)', expanded=True):
+        size_rows = [
+            {
+                '크기': '🟢 대형',
+                '기준': '50개 이상',
+                '개수': f'{len(boxes_large)}개',
+                '박스 번호': ', '.join(f'{b[1]}번({b[2]})' for b in boxes_large) if boxes_large else '-',
+            },
+            {
+                '크기': '🟡 중형',
+                '기준': '30~49개',
+                '개수': f'{len(boxes_med)}개',
+                '박스 번호': ', '.join(f'{b[1]}번({b[2]})' for b in boxes_med) if boxes_med else '-',
+            },
+            {
+                '크기': '🔵 소형',
+                '기준': '30개 미만',
+                '개수': f'{len(boxes_small)}개',
+                '박스 번호': ', '.join(f'{b[1]}번({b[2]})' for b in boxes_small) if boxes_small else '-',
+            },
+        ]
+        st.dataframe(_pd2.DataFrame(size_rows), use_container_width=True, hide_index=True)
+        st.caption(f'💡 총 {len(all_box_keys)}개 박스 준비 ・ 박스 옆 괄호는 들어갈 총 수량')
 
     if st.button('🔄 분류 초기화', key='sort_reset'):
         st.session_state.sort_state = _build_sort_state()
@@ -3232,19 +3297,25 @@ with tab9:
             return str(n)
 
         if r['status'] == 'error':
-            st.markdown(f'<div class="scan-error"><strong style="font-size:1.3rem;">{r["message"]}</strong><br>{r["detail"]}</div>', unsafe_allow_html=True)
-            speak = '없는 상품'
+            st.markdown(
+                f'<div class="scan-error"><strong style="font-size:1.4rem;">📥 보류</strong><br>'
+                f'쉽먼트 정보 없음 - 따로 보관<br>{r["detail"]}</div>',
+                unsafe_allow_html=True)
+            speak = '보류'
         elif r['status'] == 'over':
             st.markdown(f'<div class="scan-warning"><strong style="font-size:1.2rem;">{r["message"]}</strong><br>{r["detail"]}</div>', unsafe_allow_html=True)
             speak = '분류 완료'
         else:
             box_num_str = r['box_num']
             kor_n = _box_to_kor(box_num_str)
+            box_key_r = r.get('box_key', '')
+            size_label, size_emoji = box_size_lookup.get(box_key_r, ('', ''))
+            size_str = f' ({size_emoji}{size_label}형)' if size_label else ''
             if r.get('box_complete'):
                 # 박스 완료! 큰 알림 + 포장 안내
                 st.markdown(
                     f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
-                    f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번박스 완료!</div>'
+                    f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번박스{size_str} 완료!</div>'
                     f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
                     f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
                     f'</div>',
@@ -3252,7 +3323,7 @@ with tab9:
                 speak = f'{kor_n}번박스 완료. 포장하세요'
             else:
                 st.markdown(
-                    f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스 → {r["상품명"][:30]}</strong><br>'
+                    f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str} → {r["상품명"][:30]}</strong><br>'
                     f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
                     unsafe_allow_html=True)
                 speak = f'{kor_n}번박스'
@@ -3310,8 +3381,10 @@ with tab9:
             status = f'🔄 {pct:.0f}%'
         else:
             status = '⬜ 대기'
+        size_label, size_emoji = box_size_lookup.get(key, ('', ''))
         prog_rows.append({
             '박스': f"{ent['box_num']}번",
+            '크기': f'{size_emoji}{size_label}' if size_label else '-',
             '상태': status,
             'SKU완료': f'{ent["sku_done"]}/{ent["sku_total"]}',
             '수량': f'{ent["scanned"]}/{ent["needed"]}',
