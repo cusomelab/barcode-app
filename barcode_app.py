@@ -1181,7 +1181,7 @@ def pick_get_progress():
     return {"total":total,"scanned":scanned,"skus":skus,"done_skus":done_skus,
             "pct":pct,"is_complete":scanned>=total,"over":over,"shortage":shortage}
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 검증', '📥 입고 분류'])
+tab1, tab2, tab6, tab7, tab8, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 & 분류', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -3768,10 +3768,3 @@ with tab8:
             with st.expander(f'⏳ 미스캔 ({len(incomplete)}건)', expanded=False):
                 st.dataframe(_pd2.DataFrame(incomplete), use_container_width=True, hide_index=True)
 
-
-# ══════════════════════════════════════════════════════
-# 탭9: (통합됨) 피킹/분류 탭으로 합쳐짐
-# ══════════════════════════════════════════════════════
-with tab9:
-    st.header("📥 입고 분류")
-    st.info("이 기능은 **📦 피킹 & 분류** 탭에 통합되었습니다. 위 탭에서 '📥 입고 분류' 모드를 선택해주세요.")
