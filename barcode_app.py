@@ -3200,7 +3200,7 @@ with tab8:
 
         # ── 박스별 총 수량 집계 (크기 분류용) ──
         # box_num이 실제 숫자로 파싱되는 박스만 집계 (국내재고/부족 등은 제외)
-        box_qty_map = {}  # box_num(int) → {box_num, sym, total_qty}
+        box_qty_map = {}  # box_num(int) → {box_num, sym, total_qty, ships}
         for v in sort_state.values():
             for it in v['items']:
                 bn_raw = it.get('box_num')
@@ -3210,8 +3210,13 @@ with tab8:
                 if not bn_str or bn_str.lower() == 'nan' or not bn_str.isdigit():
                     continue
                 key = int(bn_str)
-                ent = box_qty_map.setdefault(key, {'box_num': bn_str, 'sym': it.get('sym', ''), 'total_qty': 0})
+                ent = box_qty_map.setdefault(key, {
+                    'box_num': bn_str, 'sym': it.get('sym', ''),
+                    'total_qty': 0, 'ships': set(),
+                })
                 ent['total_qty'] += it['needed']
+                if it.get('ship'):
+                    ent['ships'].add(it['ship'])
 
         def _box_size(qty):
             """수량 기준으로 박스 크기 분류"""
@@ -3301,11 +3306,47 @@ with tab8:
             except Exception as _e:
                 st.caption(f'라벨 생성 오류: {_e}')
 
-        if st.button('🔄 분류 초기화', key='sort_reset'):
-            st.session_state.sort_state = _build_sort_state()
-            st.session_state.sort_scan_counter = 0
-            st.session_state.sort_last_result = None
-            st.rerun()
+        # ── 시작 박스 지정 (선택사항) ──
+        st.markdown('### 🎯 작업할 배대지 박스')
+        # 추천 순서: 송장 수가 적은 박스부터 (빨리 완료)
+        recommended_boxes = sorted(
+            box_qty_map.items(),
+            key=lambda x: (len(x[1]['ships']), x[0])
+        )
+        box_options = [None] + [k for k, _ in recommended_boxes]
+
+        def _fmt_box_option(x):
+            if x is None:
+                return '전체 (박스 구분 없음)'
+            info = box_qty_map[x]
+            size_lbl, size_emo = _box_size(info['total_qty'])
+            ship_cnt = len(info['ships'])
+            return f"{x}번 ({size_emo}{size_lbl}, {info['total_qty']}개, 송장 {ship_cnt}개)"
+
+        sac1, sac2 = st.columns([3, 1])
+        with sac1:
+            active_box = st.selectbox(
+                '지금 열고 있는 배대지 박스를 선택하면 오류 방지',
+                options=box_options,
+                format_func=_fmt_box_option,
+                key='sort_active_box',
+                help='추천 순서: 송장 수가 적은 박스부터 (빨리 완료되는 순)',
+            )
+        with sac2:
+            if st.button('🔄 분류 초기화', key='sort_reset', use_container_width=True):
+                st.session_state.sort_state = _build_sort_state()
+                st.session_state.sort_scan_counter = 0
+                st.session_state.sort_last_result = None
+                st.rerun()
+
+        if active_box is not None:
+            info = box_qty_map[active_box]
+            size_lbl, size_emo = _box_size(info['total_qty'])
+            st.info(
+                f'📦 **{active_box}번 박스** 작업 중 — '
+                f'{size_emo}{size_lbl}형 / {info["total_qty"]}개 / '
+                f'송장 {len(info["ships"])}개 — 이 박스 상품만 스캔 유효'
+            )
 
         st.markdown('---')
 
@@ -3324,13 +3365,37 @@ with tab8:
                         'message': '🚨 출고지시서에 없는 바코드',
                         'detail': bc}
             item_data = sort_state[bc]
-            # 아직 채워야 할 박스 중 첫 번째 선택 (CSV 순서대로 할당)
+            # 아직 채워야 할 박스 중 후보 선택
             candidates = [it for it in item_data['items'] if it['scanned'] < it['needed']]
             if not candidates:
                 return {'status': 'over', 'barcode': bc,
                         '상품명': item_data['상품명'],
                         'message': '⚠️ 이 상품은 모두 분류 완료',
                         'detail': item_data['상품명'][:35]}
+
+            # 시작 박스 지정 모드: 해당 박스의 상품만 유효
+            _active_box = st.session_state.get('sort_active_box')
+            if _active_box is not None:
+                box_candidates = []
+                for it in candidates:
+                    try:
+                        if int(str(it.get('box_num', '')).strip()) == _active_box:
+                            box_candidates.append(it)
+                    except (ValueError, TypeError):
+                        pass
+                if not box_candidates:
+                    # 이 상품이 다른 박스에 있음
+                    other_boxes = sorted(set(
+                        str(it.get('box_num', ''))
+                        for it in item_data['items']
+                        if it.get('box_num')
+                    ))
+                    return {'status': 'wrong_box', 'barcode': bc,
+                            '상품명': item_data['상품명'],
+                            'message': f'🚨 이 상품은 {_active_box}번 박스에 없습니다',
+                            'detail': f'다른 박스: {", ".join(other_boxes)}'}
+                candidates = box_candidates
+
             target = candidates[0]
             target['scanned'] += 1
 
@@ -3413,6 +3478,11 @@ with tab8:
                     f'쉽먼트 정보 없음 - 따로 보관<br>{r["detail"]}</div>',
                     unsafe_allow_html=True)
                 speak = '보류'
+            elif r['status'] == 'wrong_box':
+                st.markdown(
+                    f'<div class="scan-error"><strong style="font-size:1.3rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
+                    unsafe_allow_html=True)
+                speak = '다른 박스 상품'
             elif r['status'] == 'over':
                 st.markdown(f'<div class="scan-warning"><strong style="font-size:1.2rem;">{r["message"]}</strong><br>{r["detail"]}</div>', unsafe_allow_html=True)
                 speak = '분류 완료'
@@ -3446,7 +3516,7 @@ with tab8:
             speak_js = speak.replace("'", "\\'").replace('"', '\\"')
             scan_id_s = st.session_state.sort_scan_counter
             beep_js = "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);"
-            if r['status'] == 'error':
+            if r['status'] in ('error', 'wrong_box'):
                 beep_js = "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);"
             elif r['status'] == 'over':
                 beep_js = "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);"
@@ -3479,10 +3549,16 @@ with tab8:
         for bc, v in sort_state.items():
             for it in v['items']:
                 key = it['box_key']
-                ent = box_summary.setdefault(key, {'box_num': it['box_num'], 'sym': it['sym'], 'needed': 0, 'scanned': 0, 'sku_total': 0, 'sku_done': 0})
+                ent = box_summary.setdefault(key, {
+                    'box_num': it['box_num'], 'sym': it['sym'],
+                    'needed': 0, 'scanned': 0, 'sku_total': 0, 'sku_done': 0,
+                    'ships': set(),
+                })
                 ent['needed'] += it['needed']
                 ent['scanned'] += it['scanned']
                 ent['sku_total'] += 1
+                if it.get('ship'):
+                    ent['ships'].add(it['ship'])
                 if it['scanned'] >= it['needed']:
                     ent['sku_done'] += 1
 
@@ -3503,6 +3579,7 @@ with tab8:
             prog_rows.append({
                 '박스': f"{ent['box_num']}번",
                 '크기': f'{size_emoji}{size_label}' if size_label else '-',
+                '송장수': len(ent['ships']),
                 '상태': status,
                 'SKU완료': f'{ent["sku_done"]}/{ent["sku_total"]}',
                 '수량': f'{ent["scanned"]}/{ent["needed"]}',
