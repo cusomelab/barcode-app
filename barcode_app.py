@@ -745,6 +745,43 @@ def create_box_labels_pdf(box_entries):
     return buf
 
 
+def create_multi_trigger_label_pdf():
+    """다량 입력 트리거 바코드(#MULTI) A4 한 장짜리 PDF"""
+    from reportlab.pdfgen import canvas as _canvas
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.lib.units import mm as _mm
+    from reportlab.lib.utils import ImageReader as _ImageReader
+
+    buf = io.BytesIO()
+    c = _canvas.Canvas(buf, pagesize=_A4)
+    page_w, page_h = _A4
+
+    barcode_text = '#MULTI'
+    try:
+        bc_img = get_barcode_img(barcode_text, write_text=False)
+        bc_buf = io.BytesIO()
+        bc_img.save(bc_buf, format='PNG')
+        bc_buf.seek(0)
+        bc_w = 160 * _mm
+        bc_h = 80 * _mm
+        x = (page_w - bc_w) / 2
+        y = (page_h - bc_h) / 2
+        c.drawImage(
+            _ImageReader(bc_buf),
+            x, y,
+            width=bc_w,
+            height=bc_h,
+            preserveAspectRatio=False,
+            mask='auto',
+        )
+    except Exception:
+        pass
+
+    c.save()
+    buf.seek(0)
+    return buf
+
+
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
@@ -2432,59 +2469,71 @@ with tab6:
                     progress.progress(1.0)
                     status.text('✅ 완료!')
 
-                    # ===== 결과 표시 =====
-                    st.divider()
-                    st.subheader('📋 처리 결과')
-                    st.markdown(f"""
-| 구분 | 페이지 |
-|------|--------|
-| 출고지시서 + 매니페스트 (교차) | {total_pages - label_total}p |
-| 라벨 4분할 | {label_total}p |
-| **전체 합계** | **{total_pages}p** |
-""")
-                    st.caption('순서: [출고지시서→매니페스트→라벨] 송장번호순 통합 배치')
-
-                    st.divider()
-
-                    # ── 다운로드 버튼 3개 ────────────────────
-                    today = datetime.now().strftime('%Y%m%d_%H%M')
-
-                    col_a, col_b, col_c = st.columns(3)
-                    with col_a:
-                        st.download_button(
-                            label=f'⬇️ 전체 통합 PDF ({total_pages}p)',
-                            data=final_buf,
-                            file_name=f'shipment_ALL_merged_{today}.pdf',
-                            mime='application/pdf',
-                            key='ship_dl_all',
-                            type='primary'
-                        )
-
-                    with col_b:
-                        shipment_only_buf.seek(0)
-                        st.download_button(
-                            label=f'⬇️ 쉽먼트만 ({shipment_only_pages}p)',
-                            data=shipment_only_buf,
-                            file_name=f'shipment_only_{today}.pdf',
-                            mime='application/pdf',
-                            key='ship_dl_shipment'
-                        )
-
-                    with col_c:
-                        if so_pdf_buf:
-                            so_pdf_buf.seek(0)
-                            st.download_button(
-                                label=f'⬇️ 출고지시서만 ({so_pages}p)',
-                                data=so_pdf_buf,
-                                file_name=f'출고지시서_{today}.pdf',
-                                mime='application/pdf',
-                                key='ship_dl_so'
-                            )
+                    # 결과를 session_state에 저장 (다운로드 버튼 클릭 후에도 유지)
+                    st.session_state.shipment_result = {
+                        'final_bytes': final_buf.getvalue(),
+                        'shipment_only_bytes': shipment_only_buf.getvalue(),
+                        'so_bytes': so_pdf_buf.getvalue() if so_pdf_buf else None,
+                        'total_pages': total_pages,
+                        'label_total': label_total,
+                        'shipment_only_pages': shipment_only_pages,
+                        'so_pages': so_pages,
+                        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+                    }
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
                     import traceback
                     st.code(traceback.format_exc())
+
+        # ===== 결과 표시 (session_state에서 읽어 버튼 유지) =====
+        if 'shipment_result' in st.session_state:
+            sres = st.session_state.shipment_result
+            st.divider()
+            st.subheader('📋 처리 결과')
+            st.markdown(f"""
+| 구분 | 페이지 |
+|------|--------|
+| 출고지시서 + 매니페스트 (교차) | {sres['total_pages'] - sres['label_total']}p |
+| 라벨 4분할 | {sres['label_total']}p |
+| **전체 합계** | **{sres['total_pages']}p** |
+""")
+            st.caption('순서: [출고지시서→매니페스트→라벨] 송장번호순 통합 배치')
+
+            st.divider()
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.download_button(
+                    label=f"⬇️ 전체 통합 PDF ({sres['total_pages']}p)",
+                    data=sres['final_bytes'],
+                    file_name=f"shipment_ALL_merged_{sres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='ship_dl_all',
+                    type='primary',
+                    use_container_width=True,
+                )
+
+            with col_b:
+                st.download_button(
+                    label=f"⬇️ 쉽먼트만 ({sres['shipment_only_pages']}p)",
+                    data=sres['shipment_only_bytes'],
+                    file_name=f"shipment_only_{sres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='ship_dl_shipment',
+                    use_container_width=True,
+                )
+
+            with col_c:
+                if sres['so_bytes']:
+                    st.download_button(
+                        label=f"⬇️ 출고지시서만 ({sres['so_pages']}p)",
+                        data=sres['so_bytes'],
+                        file_name=f"출고지시서_{sres['timestamp']}.pdf",
+                        mime='application/pdf',
+                        key='ship_dl_so',
+                        use_container_width=True,
+                    )
 
 # ── 쉽먼트 재출력 탭 ──────────────────────────────────────
 with tab7:
@@ -2655,9 +2704,13 @@ with tab7:
 
                     # ===== 5. 매칭된 송장만 필터링하여 통합 PDF 생성 =====
                     rp_status.text('📎 통합 PDF 생성 중...')
-                    rp_final_writer = PdfWriter()
+                    rp_final_writer = PdfWriter()          # 전체 통합
+                    rp_shipment_only_writer = PdfWriter()  # 쉽먼트만 (매니페스트 + 라벨)
+                    rp_so_only_writer = PdfWriter()        # 출고지시서만
                     rp_total = 0
                     rp_label_total = 0
+                    rp_shipment_total = 0
+                    rp_so_total = 0
 
                     # 송장별 라벨 그룹 매핑
                     rp_label_by_inv = {}
@@ -2680,21 +2733,25 @@ with tab7:
                             if inv not in matched:
                                 continue
 
-                            # 출고지시서
+                            # 출고지시서 (전체통합 + 출고지시서만)
                             if inv in rp_so_by_invoice:
                                 so_buf = rp_so_by_invoice[inv]
                                 so_buf.seek(0)
                                 so_reader = PdfReader(so_buf)
                                 for page in so_reader.pages:
                                     rp_final_writer.add_page(page)
+                                    rp_so_only_writer.add_page(page)
                                 rp_total += len(so_reader.pages)
+                                rp_so_total += len(so_reader.pages)
 
-                            # 매니페스트
+                            # 매니페스트 (전체통합 + 쉽먼트만)
                             for pidx in g['page_indices']:
                                 rp_final_writer.add_page(m_reader.pages[pidx])
+                                rp_shipment_only_writer.add_page(m_reader.pages[pidx])
                                 rp_total += 1
+                                rp_shipment_total += 1
 
-                            # 라벨
+                            # 라벨 (전체통합 + 쉽먼트만)
                             inv_key = inv or ''
                             if inv_key in rp_label_by_inv.get(sid, {}):
                                 inv_label_groups = rp_label_by_inv[sid].pop(inv_key)
@@ -2705,8 +2762,10 @@ with tab7:
                                     img_buf.seek(0)
                                     lp = PdfReader(img_buf)
                                     rp_final_writer.add_page(lp.pages[0])
+                                    rp_shipment_only_writer.add_page(lp.pages[0])
                                     rp_total += 1
                                     rp_label_total += 1
+                                    rp_shipment_total += 1
 
                     rp_progress.progress(0.9)
 
@@ -2714,38 +2773,80 @@ with tab7:
                     rp_final_writer.write(rp_final_buf)
                     rp_final_buf.seek(0)
 
+                    rp_shipment_only_buf = io.BytesIO()
+                    rp_shipment_only_writer.write(rp_shipment_only_buf)
+                    rp_shipment_only_buf.seek(0)
+
+                    rp_so_only_buf = io.BytesIO()
+                    rp_so_only_writer.write(rp_so_only_buf)
+                    rp_so_only_buf.seek(0)
+
                     rp_progress.progress(1.0)
                     rp_status.text('✅ 완료!')
 
-                    # ===== 결과 표시 =====
-                    st.divider()
-                    st.subheader('📋 재출력 결과')
-                    st.markdown(f"""
-| 구분 | 수량 |
-|------|------|
-| 매칭된 송장 | {len(matched)}건 |
-| 출고지시서 + 매니페스트 | {rp_total - rp_label_total}p |
-| 라벨 4분할 | {rp_label_total}p |
-| **전체 합계** | **{rp_total}p** |
-""")
-                    st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
-
-                    st.divider()
-
-                    today = datetime.now().strftime('%Y%m%d_%H%M')
-                    st.download_button(
-                        label=f'⬇️ 재출력 통합 PDF ({rp_total}p)',
-                        data=rp_final_buf,
-                        file_name=f'shipment_reprint_{today}.pdf',
-                        mime='application/pdf',
-                        key='reprint_dl',
-                        type='primary'
-                    )
+                    # 결과를 session_state에 저장 (다운로드 버튼 클릭 후에도 유지)
+                    st.session_state.reprint_result = {
+                        'final_bytes': rp_final_buf.getvalue(),
+                        'shipment_only_bytes': rp_shipment_only_buf.getvalue(),
+                        'so_only_bytes': rp_so_only_buf.getvalue(),
+                        'total': rp_total,
+                        'shipment_total': rp_shipment_total,
+                        'so_total': rp_so_total,
+                        'matched': len(matched),
+                        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+                    }
 
                 except Exception as e:
                     st.error(f'❌ 오류 발생: {e}')
                     import traceback
                     st.code(traceback.format_exc())
+
+        # ===== 결과 표시 (session_state에서 읽어 버튼 유지) =====
+        if 'reprint_result' in st.session_state:
+            res = st.session_state.reprint_result
+            st.divider()
+            st.subheader('📋 재출력 결과')
+            st.markdown(f"""
+| 구분 | 수량 |
+|------|------|
+| 매칭된 송장 | {res['matched']}건 |
+| 출고지시서 | {res['so_total']}p |
+| 쉽먼트 (매니페스트+라벨) | {res['shipment_total']}p |
+| **전체 합계** | **{res['total']}p** |
+""")
+            st.caption('순서: [출고지시서→매니페스트→라벨] 매칭 송장번호순 통합 배치')
+
+            st.divider()
+
+            rp_col_a, rp_col_b, rp_col_c = st.columns(3)
+            with rp_col_a:
+                st.download_button(
+                    label=f"⬇️ 전체 통합 PDF ({res['total']}p)",
+                    data=res['final_bytes'],
+                    file_name=f"shipment_reprint_ALL_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl',
+                    type='primary',
+                    use_container_width=True,
+                )
+            with rp_col_b:
+                st.download_button(
+                    label=f"⬇️ 쉽먼트만 ({res['shipment_total']}p)",
+                    data=res['shipment_only_bytes'],
+                    file_name=f"shipment_reprint_shipment_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl_shipment',
+                    use_container_width=True,
+                )
+            with rp_col_c:
+                st.download_button(
+                    label=f"⬇️ 출고지시서만 ({res['so_total']}p)",
+                    data=res['so_only_bytes'],
+                    file_name=f"shipment_reprint_so_{res['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='reprint_dl_so',
+                    use_container_width=True,
+                )
 
 # ══════════════════════════════════════════════════════
 # 탭8: 피킹 검증 시스템
@@ -3331,6 +3432,21 @@ with tab8:
             except Exception as _e:
                 st.caption(f'라벨 생성 오류: {_e}')
 
+            # #MULTI 트리거 라벨 PDF
+            try:
+                multi_pdf_buf = create_multi_trigger_label_pdf()
+                st.download_button(
+                    label='🔢 다량 입력 트리거 바코드 PDF (1회만 출력)',
+                    data=multi_pdf_buf,
+                    file_name='multi_trigger_label.pdf',
+                    mime='application/pdf',
+                    key='sort_multi_trigger_dl',
+                    use_container_width=True,
+                )
+                st.caption('📄 A4 한 장에 큰 바코드. 인쇄해서 잘 보이는 곳에 부착하세요')
+            except Exception as _e:
+                st.caption(f'트리거 라벨 생성 오류: {_e}')
+
         # ── 송장별 우선순위 계산 ──
         # 핵심: 수량 많고 배대지 박스 수 적은 송장 = 빨리 완성 가능 = 우선순위 높음
         ship_stats = {}  # ship_id → {qty, dapae_boxes: set, score}
@@ -3478,15 +3594,64 @@ with tab8:
         st.markdown('---')
 
         # ── 바코드 스캔 ──
+        # 다량 모드 상태
+        if 'sort_next_qty' not in st.session_state:
+            st.session_state.sort_next_qty = 1
+        if 'sort_qty_input_mode' not in st.session_state:
+            st.session_state.sort_qty_input_mode = False
+
+        # 수량 표시 + 입력
+        qcol1, qcol2, qcol3 = st.columns([1, 2, 2])
+        with qcol1:
+            if st.session_state.sort_next_qty > 1:
+                st.markdown(
+                    f'<div style="background:#f59e0b;color:white;padding:0.5rem;border-radius:6px;text-align:center;font-weight:bold;font-size:1.1rem">'
+                    f'📦 다음 스캔: {st.session_state.sort_next_qty}개'
+                    f'</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div style="background:#e5e7eb;padding:0.5rem;border-radius:6px;text-align:center">'
+                    '1개 모드'
+                    '</div>', unsafe_allow_html=True)
+        with qcol2:
+            # 수량 입력 모드일 때만 입력창 표시
+            if st.session_state.sort_qty_input_mode:
+                qty_input = st.number_input(
+                    '수량 입력 후 상품 스캔',
+                    min_value=1, max_value=9999, value=1,
+                    key=f'sort_qty_input_{st.session_state.sort_scan_counter}',
+                )
+                st.session_state.sort_next_qty = int(qty_input)
+        with qcol3:
+            if st.session_state.sort_qty_input_mode:
+                if st.button('✅ 수량 확정', key='sort_qty_confirm', use_container_width=True, type='primary'):
+                    st.session_state.sort_qty_input_mode = False
+                    st.rerun()
+            if st.session_state.sort_next_qty > 1 and not st.session_state.sort_qty_input_mode:
+                if st.button('🔄 1개 모드로', key='sort_qty_reset', use_container_width=True):
+                    st.session_state.sort_next_qty = 1
+                    st.rerun()
+
         sort_scan_key = f"sort_scan_{st.session_state.sort_scan_counter}"
         sort_scanned = st.text_input(
             '🔫 바코드 스캔',
             key=sort_scan_key,
-            placeholder='박스에서 꺼낸 상품의 바코드를 스캔하세요',
+            placeholder='박스에서 꺼낸 상품의 바코드를 스캔하세요 (여러 개면 #MULTI 바코드 먼저)',
         )
 
         def _process_sort_scan(bc):
             bc = bc.strip()
+
+            # #MULTI 트리거 → 수량 입력 모드 진입
+            if bc.upper() == '#MULTI':
+                st.session_state.sort_qty_input_mode = True
+                st.session_state.sort_next_qty = 1
+                return {
+                    'status': 'multi_trigger',
+                    'barcode': bc,
+                    'message': '🔢 다량 입력 모드',
+                    'detail': '수량을 입력한 후 상품 바코드를 스캔하세요',
+                }
 
             # #N 바코드 → 박스 토글
             import re as _re_bc
@@ -3551,11 +3716,37 @@ with tab8:
                             'detail': f'이 상품은 {", ".join(other_boxes)}번 박스에 있음'}
                 candidates = box_candidates
 
-            target = candidates[0]
-            target['scanned'] += 1
+            # 다량 모드: next_qty 만큼 차감 (여러 박스에 걸쳐 자동 분배)
+            requested_qty = int(st.session_state.get('sort_next_qty', 1))
+            requested_qty = max(1, requested_qty)
+            processed = 0
+            last_target = candidates[0]
+            # 후보들을 순회하며 각 박스 채워가기
+            remaining_to_scan = requested_qty
+            idx = 0
+            while remaining_to_scan > 0 and idx < len(candidates):
+                it = candidates[idx]
+                space = it['needed'] - it['scanned']
+                if space <= 0:
+                    idx += 1
+                    continue
+                take = min(space, remaining_to_scan)
+                it['scanned'] += take
+                processed += take
+                remaining_to_scan -= take
+                last_target = it
+                if it['scanned'] >= it['needed']:
+                    idx += 1
+
+            # 모두 차감 후 남은 수량 (수량 초과)
+            over_qty = requested_qty - processed
+
+            # 다량 모드는 1회용: 원래대로 복귀
+            st.session_state.sort_next_qty = 1
+            st.session_state.sort_qty_input_mode = False
 
             # 이 박스(box_key)가 다 채워졌는지 확인
-            target_box_key = target['box_key']
+            target_box_key = last_target['box_key']
             box_complete = True
             for _bc, _v in sort_state.items():
                 for _it in _v['items']:
@@ -3569,12 +3760,14 @@ with tab8:
                 'status': 'ok',
                 'barcode': bc,
                 '상품명': item_data['상품명'],
-                'box_key': target['box_key'],
-                'box_num': target['box_num'],
-                'sym': target['sym'],
-                'ship': target['ship'],
-                'remaining': target['needed'] - target['scanned'],
+                'box_key': last_target['box_key'],
+                'box_num': last_target['box_num'],
+                'sym': last_target['sym'],
+                'ship': last_target['ship'],
+                'remaining': last_target['needed'] - last_target['scanned'],
                 'box_complete': box_complete,
+                'processed_qty': processed,
+                'over_qty': over_qty,
             }
 
         if sort_scanned:
@@ -3627,7 +3820,15 @@ with tab8:
                     return t_str + (_KOR_NUMS_SORT.get(ones, '') if ones else '')
                 return str(n)
 
-            if r['status'] == 'box_toggle':
+            if r['status'] == 'multi_trigger':
+                st.markdown(
+                    f'<div class="scan-complete" style="background:#f59e0b;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #d97706">'
+                    f'<div style="font-size:2.2rem;font-weight:bold;">🔢 수량을 입력하세요</div>'
+                    f'<div style="font-size:1.1rem;margin-top:0.8rem;">수량 입력 후 "수량 확정" 또는 바로 상품 바코드 스캔</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+                speak = '수량을 입력하세요'
+            elif r['status'] == 'box_toggle':
                 st.markdown(
                     f'<div class="scan-complete" style="background:#3b82f6;color:white;padding:1.5rem;border-radius:10px;text-align:center;border-left:8px solid #1e40af">'
                     f'<div style="font-size:1.8rem;font-weight:bold;">{r["message"]}</div>'
@@ -3670,11 +3871,18 @@ with tab8:
                         unsafe_allow_html=True)
                     speak = f'{kor_n}번박스 완료. 포장하세요'
                 else:
+                    processed_qty = r.get('processed_qty', 1)
+                    over_qty = r.get('over_qty', 0)
+                    qty_str = f' × {processed_qty}개' if processed_qty > 1 else ''
+                    over_str = f' ⚠️ {over_qty}개 초과' if over_qty > 0 else ''
                     st.markdown(
-                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str} → {r["상품명"][:30]}</strong><br>'
-                        f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
+                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
+                        f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개{over_str}</div>',
                         unsafe_allow_html=True)
-                    speak = f'{kor_n}번박스'
+                    if processed_qty > 1:
+                        speak = f'{kor_n}번박스 {processed_qty}개'
+                    else:
+                        speak = f'{kor_n}번박스'
 
             # 소리 + 음성
             speak_js = speak.replace("'", "\\'").replace('"', '\\"')
