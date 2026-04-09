@@ -745,6 +745,43 @@ def create_box_labels_pdf(box_entries):
     return buf
 
 
+def create_multi_trigger_label_pdf():
+    """다량 입력 트리거 바코드(#MULTI) A4 한 장짜리 PDF"""
+    from reportlab.pdfgen import canvas as _canvas
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.lib.units import mm as _mm
+    from reportlab.lib.utils import ImageReader as _ImageReader
+
+    buf = io.BytesIO()
+    c = _canvas.Canvas(buf, pagesize=_A4)
+    page_w, page_h = _A4
+
+    barcode_text = '#MULTI'
+    try:
+        bc_img = get_barcode_img(barcode_text, write_text=False)
+        bc_buf = io.BytesIO()
+        bc_img.save(bc_buf, format='PNG')
+        bc_buf.seek(0)
+        bc_w = 160 * _mm
+        bc_h = 80 * _mm
+        x = (page_w - bc_w) / 2
+        y = (page_h - bc_h) / 2
+        c.drawImage(
+            _ImageReader(bc_buf),
+            x, y,
+            width=bc_w,
+            height=bc_h,
+            preserveAspectRatio=False,
+            mask='auto',
+        )
+    except Exception:
+        pass
+
+    c.save()
+    buf.seek(0)
+    return buf
+
+
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
@@ -3395,6 +3432,21 @@ with tab8:
             except Exception as _e:
                 st.caption(f'라벨 생성 오류: {_e}')
 
+            # #MULTI 트리거 라벨 PDF
+            try:
+                multi_pdf_buf = create_multi_trigger_label_pdf()
+                st.download_button(
+                    label='🔢 다량 입력 트리거 바코드 PDF (1회만 출력)',
+                    data=multi_pdf_buf,
+                    file_name='multi_trigger_label.pdf',
+                    mime='application/pdf',
+                    key='sort_multi_trigger_dl',
+                    use_container_width=True,
+                )
+                st.caption('📄 A4 한 장에 큰 바코드. 인쇄해서 잘 보이는 곳에 부착하세요')
+            except Exception as _e:
+                st.caption(f'트리거 라벨 생성 오류: {_e}')
+
         # ── 송장별 우선순위 계산 ──
         # 핵심: 수량 많고 배대지 박스 수 적은 송장 = 빨리 완성 가능 = 우선순위 높음
         ship_stats = {}  # ship_id → {qty, dapae_boxes: set, score}
@@ -3542,15 +3594,64 @@ with tab8:
         st.markdown('---')
 
         # ── 바코드 스캔 ──
+        # 다량 모드 상태
+        if 'sort_next_qty' not in st.session_state:
+            st.session_state.sort_next_qty = 1
+        if 'sort_qty_input_mode' not in st.session_state:
+            st.session_state.sort_qty_input_mode = False
+
+        # 수량 표시 + 입력
+        qcol1, qcol2, qcol3 = st.columns([1, 2, 2])
+        with qcol1:
+            if st.session_state.sort_next_qty > 1:
+                st.markdown(
+                    f'<div style="background:#f59e0b;color:white;padding:0.5rem;border-radius:6px;text-align:center;font-weight:bold;font-size:1.1rem">'
+                    f'📦 다음 스캔: {st.session_state.sort_next_qty}개'
+                    f'</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    '<div style="background:#e5e7eb;padding:0.5rem;border-radius:6px;text-align:center">'
+                    '1개 모드'
+                    '</div>', unsafe_allow_html=True)
+        with qcol2:
+            # 수량 입력 모드일 때만 입력창 표시
+            if st.session_state.sort_qty_input_mode:
+                qty_input = st.number_input(
+                    '수량 입력 후 상품 스캔',
+                    min_value=1, max_value=9999, value=1,
+                    key=f'sort_qty_input_{st.session_state.sort_scan_counter}',
+                )
+                st.session_state.sort_next_qty = int(qty_input)
+        with qcol3:
+            if st.session_state.sort_qty_input_mode:
+                if st.button('✅ 수량 확정', key='sort_qty_confirm', use_container_width=True, type='primary'):
+                    st.session_state.sort_qty_input_mode = False
+                    st.rerun()
+            if st.session_state.sort_next_qty > 1 and not st.session_state.sort_qty_input_mode:
+                if st.button('🔄 1개 모드로', key='sort_qty_reset', use_container_width=True):
+                    st.session_state.sort_next_qty = 1
+                    st.rerun()
+
         sort_scan_key = f"sort_scan_{st.session_state.sort_scan_counter}"
         sort_scanned = st.text_input(
             '🔫 바코드 스캔',
             key=sort_scan_key,
-            placeholder='박스에서 꺼낸 상품의 바코드를 스캔하세요',
+            placeholder='박스에서 꺼낸 상품의 바코드를 스캔하세요 (여러 개면 #MULTI 바코드 먼저)',
         )
 
         def _process_sort_scan(bc):
             bc = bc.strip()
+
+            # #MULTI 트리거 → 수량 입력 모드 진입
+            if bc.upper() == '#MULTI':
+                st.session_state.sort_qty_input_mode = True
+                st.session_state.sort_next_qty = 1
+                return {
+                    'status': 'multi_trigger',
+                    'barcode': bc,
+                    'message': '🔢 다량 입력 모드',
+                    'detail': '수량을 입력한 후 상품 바코드를 스캔하세요',
+                }
 
             # #N 바코드 → 박스 토글
             import re as _re_bc
@@ -3615,11 +3716,37 @@ with tab8:
                             'detail': f'이 상품은 {", ".join(other_boxes)}번 박스에 있음'}
                 candidates = box_candidates
 
-            target = candidates[0]
-            target['scanned'] += 1
+            # 다량 모드: next_qty 만큼 차감 (여러 박스에 걸쳐 자동 분배)
+            requested_qty = int(st.session_state.get('sort_next_qty', 1))
+            requested_qty = max(1, requested_qty)
+            processed = 0
+            last_target = candidates[0]
+            # 후보들을 순회하며 각 박스 채워가기
+            remaining_to_scan = requested_qty
+            idx = 0
+            while remaining_to_scan > 0 and idx < len(candidates):
+                it = candidates[idx]
+                space = it['needed'] - it['scanned']
+                if space <= 0:
+                    idx += 1
+                    continue
+                take = min(space, remaining_to_scan)
+                it['scanned'] += take
+                processed += take
+                remaining_to_scan -= take
+                last_target = it
+                if it['scanned'] >= it['needed']:
+                    idx += 1
+
+            # 모두 차감 후 남은 수량 (수량 초과)
+            over_qty = requested_qty - processed
+
+            # 다량 모드는 1회용: 원래대로 복귀
+            st.session_state.sort_next_qty = 1
+            st.session_state.sort_qty_input_mode = False
 
             # 이 박스(box_key)가 다 채워졌는지 확인
-            target_box_key = target['box_key']
+            target_box_key = last_target['box_key']
             box_complete = True
             for _bc, _v in sort_state.items():
                 for _it in _v['items']:
@@ -3633,12 +3760,14 @@ with tab8:
                 'status': 'ok',
                 'barcode': bc,
                 '상품명': item_data['상품명'],
-                'box_key': target['box_key'],
-                'box_num': target['box_num'],
-                'sym': target['sym'],
-                'ship': target['ship'],
-                'remaining': target['needed'] - target['scanned'],
+                'box_key': last_target['box_key'],
+                'box_num': last_target['box_num'],
+                'sym': last_target['sym'],
+                'ship': last_target['ship'],
+                'remaining': last_target['needed'] - last_target['scanned'],
                 'box_complete': box_complete,
+                'processed_qty': processed,
+                'over_qty': over_qty,
             }
 
         if sort_scanned:
@@ -3691,7 +3820,15 @@ with tab8:
                     return t_str + (_KOR_NUMS_SORT.get(ones, '') if ones else '')
                 return str(n)
 
-            if r['status'] == 'box_toggle':
+            if r['status'] == 'multi_trigger':
+                st.markdown(
+                    f'<div class="scan-complete" style="background:#f59e0b;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #d97706">'
+                    f'<div style="font-size:2.2rem;font-weight:bold;">🔢 수량을 입력하세요</div>'
+                    f'<div style="font-size:1.1rem;margin-top:0.8rem;">수량 입력 후 "수량 확정" 또는 바로 상품 바코드 스캔</div>'
+                    f'</div>',
+                    unsafe_allow_html=True)
+                speak = '수량을 입력하세요'
+            elif r['status'] == 'box_toggle':
                 st.markdown(
                     f'<div class="scan-complete" style="background:#3b82f6;color:white;padding:1.5rem;border-radius:10px;text-align:center;border-left:8px solid #1e40af">'
                     f'<div style="font-size:1.8rem;font-weight:bold;">{r["message"]}</div>'
@@ -3734,11 +3871,18 @@ with tab8:
                         unsafe_allow_html=True)
                     speak = f'{kor_n}번박스 완료. 포장하세요'
                 else:
+                    processed_qty = r.get('processed_qty', 1)
+                    over_qty = r.get('over_qty', 0)
+                    qty_str = f' × {processed_qty}개' if processed_qty > 1 else ''
+                    over_str = f' ⚠️ {over_qty}개 초과' if over_qty > 0 else ''
                     st.markdown(
-                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str} → {r["상품명"][:30]}</strong><br>'
-                        f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개</div>',
+                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
+                        f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개{over_str}</div>',
                         unsafe_allow_html=True)
-                    speak = f'{kor_n}번박스'
+                    if processed_qty > 1:
+                        speak = f'{kor_n}번박스 {processed_qty}개'
+                    else:
+                        speak = f'{kor_n}번박스'
 
             # 소리 + 음성
             speak_js = speak.replace("'", "\\'").replace('"', '\\"')
