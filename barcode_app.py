@@ -785,7 +785,7 @@ def create_multi_trigger_label_pdf():
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
+st.set_page_config(page_title='쿠썸 로켓배송 운영 관리', page_icon='🚀', layout='centered')
 st.markdown("""<style>
     .block-container { max-width: 58rem !important; }
     /* 피킹 스캔 결과 피드백 */
@@ -821,7 +821,7 @@ st.markdown("""<style>
         background: #f0f2f6; padding: 2rem; border-radius: 12px; text-align: center;
     }
 </style>""", unsafe_allow_html=True)
-st.title('🚀 로켓배송 운영 관리')
+st.title('🚀 쿠썸 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
 # ══════════════════════════════════════════════════════
