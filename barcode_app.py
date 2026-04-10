@@ -785,7 +785,7 @@ def create_multi_trigger_label_pdf():
 # ══════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════
-st.set_page_config(page_title='로켓배송 운영 관리', page_icon='🚀', layout='centered')
+st.set_page_config(page_title='쿠썸 로켓배송 운영 관리', page_icon='🚀', layout='centered')
 st.markdown("""<style>
     .block-container { max-width: 58rem !important; }
     /* 피킹 스캔 결과 피드백 */
@@ -821,7 +821,7 @@ st.markdown("""<style>
         background: #f0f2f6; padding: 2rem; border-radius: 12px; text-align: center;
     }
 </style>""", unsafe_allow_html=True)
-st.title('🚀 로켓배송 운영 관리')
+st.title('🚀 쿠썸 로켓배송 운영 관리')
 st.caption('엑셀 파일을 업로드하면 바코드 이미지를 자동으로 삽입합니다')
 
 # ══════════════════════════════════════════════════════
@@ -3775,7 +3775,7 @@ with tab8:
             st.session_state.sort_scan_counter += 1
             st.rerun()
 
-        # 자동 포커스
+        # 자동 포커스 (multiselect/number input 상호작용 중에는 포커스 안 가로챔)
         from streamlit.components.v1 import html as _sort_html
         _sort_html("""<script>
         (function(){
@@ -3787,13 +3787,34 @@ with tab8:
                 }
                 return null;
             }
+            function isInteractingOther(){
+                const active = doc.activeElement;
+                if (!active) return false;
+                const tag = (active.tagName || '').toLowerCase();
+                // number input (수량), textarea, button
+                if (tag === 'button' || tag === 'textarea') return true;
+                if (tag === 'input' && active.type !== 'text') return true;
+                // Streamlit BaseWeb select (multiselect) 내부
+                if (active.closest) {
+                    if (active.closest('[data-baseweb="select"]')) return true;
+                    if (active.closest('[data-baseweb="popover"]')) return true;
+                    if (active.closest('[role="listbox"]')) return true;
+                    if (active.closest('[role="combobox"]')) return true;
+                }
+                return false;
+            }
             function focusScan(){
                 const inp = findScan();
-                if (inp && doc.activeElement !== inp) inp.focus();
+                if (!inp) return;
+                if (doc.activeElement === inp) return;
+                if (isInteractingOther()) return;
+                // 팝오버/드롭다운이 열려있으면 포커스 안 함
+                if (doc.querySelector('[data-baseweb="popover"]')) return;
+                inp.focus();
             }
             focusScan();
             if (window._sortFocusInterval) clearInterval(window._sortFocusInterval);
-            window._sortFocusInterval = setInterval(focusScan, 300);
+            window._sortFocusInterval = setInterval(focusScan, 500);
         })();
         </script>""", height=0)
 
