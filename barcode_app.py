@@ -950,12 +950,13 @@ def pick_parse_box(box_str):
     match = re.match(r"((?:국내)?부족)\((-?\d+)\)", box_str)
     if match:
         return {"기호": match.group(1), "박스": None, "수량": int(match.group(2)), "상태": "부족"}
-    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)(\d+)\((\d+)\)", box_str)
+    # 영문+숫자 형식 (예: W1, M3) + 수량
+    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)([A-Za-z]*\d+)\((\d+)\)", box_str)
     if match:
-        return {"기호": match.group(1), "박스": match.group(2), "수량": int(match.group(3)), "상태": "피킹가능"}
-    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)(\d+)", box_str)
+        return {"기호": match.group(1), "박스": match.group(2).upper(), "수량": int(match.group(3)), "상태": "피킹가능"}
+    match = re.match(r"([●★■▲◆◇○□△▼♦♠♣♥☆※·]+)([A-Za-z]*\d+)", box_str)
     if match:
-        return {"기호": match.group(1), "박스": match.group(2), "수량": None, "상태": "피킹가능"}
+        return {"기호": match.group(1), "박스": match.group(2).upper(), "수량": None, "상태": "피킹가능"}
     match = re.match(r"(국내재고)\((\d+)\)", box_str)
     if match:
         return {"기호": match.group(1), "박스": None, "수량": int(match.group(2)), "상태": "피킹가능"}
@@ -3326,16 +3327,21 @@ with tab8:
 
         # ── 박스별 총 수량 집계 (크기 분류용) ──
         # box_num이 실제 숫자로 파싱되는 박스만 집계 (국내재고/부족 등은 제외)
-        box_qty_map = {}  # box_num(int) → {box_num, sym, total_qty, ships}
+        # box_num은 'W1', 'M3' 같은 문자열 또는 '1', '2' 같은 숫자 문자열
+        import re as _re_bq
+        box_qty_map = {}  # box_num(str) → {box_num, sym, total_qty, ships}
         for v in sort_state.values():
             for it in v['items']:
                 bn_raw = it.get('box_num')
                 if bn_raw is None:
                     continue
-                bn_str = str(bn_raw).strip()
-                if not bn_str or bn_str.lower() == 'nan' or not bn_str.isdigit():
+                bn_str = str(bn_raw).strip().upper()
+                # 유효한 박스번호: 영문+숫자 또는 숫자만 (국내재고/부족 등 제외)
+                if not bn_str or bn_str == 'NAN':
                     continue
-                key = int(bn_str)
+                if not _re_bq.match(r'^[A-Z]*\d+$', bn_str):
+                    continue
+                key = bn_str
                 ent = box_qty_map.setdefault(key, {
                     'box_num': bn_str, 'sym': it.get('sym', ''),
                     'total_qty': 0, 'ships': set(),
@@ -3353,13 +3359,23 @@ with tab8:
             else:
                 return ('소', '🔵')
 
+        def _box_sort_key(box_str):
+            """박스 번호 정렬 키: (알파벳 부분, 숫자 부분) 튜플
+            'W1' → ('W', 1), 'M3' → ('M', 3), '1' → ('', 1)
+            """
+            import re as _re_sk
+            m = _re_sk.match(r'^([A-Z]*)(\d+)$', str(box_str).upper())
+            if m:
+                return (m.group(1), int(m.group(2)))
+            return (str(box_str), 0)
+
         # 박스 크기별 그룹
-        boxes_large = []  # [(box_num_int, box_num_str, qty)]
+        boxes_large = []  # [(sort_key, box_num_str, qty)]
         boxes_med = []
         boxes_small = []
         for key, info in box_qty_map.items():
             size_label, _ = _box_size(info['total_qty'])
-            entry = (key, info['box_num'], info['total_qty'])
+            entry = (_box_sort_key(key), info['box_num'], info['total_qty'])
             if size_label == '대':
                 boxes_large.append(entry)
             elif size_label == '중':
@@ -3413,9 +3429,9 @@ with tab8:
 
             # ── 폼텍 3100 라벨 PDF 다운로드 ──
             label_entries = []
-            # 박스번호 → 사이즈 라벨 매핑
+            # 박스번호 → 사이즈 라벨 매핑 (W1, M3 등 문자열 지원)
             for key, info in sorted(box_qty_map.items(),
-                                    key=lambda x: int(x[1]['box_num']) if x[1]['box_num'].isdigit() else 0):
+                                    key=lambda x: _box_sort_key(x[1]['box_num'])):
                 size_lbl, size_emoji = _box_size(info['total_qty'])
                 label_entries.append((info['box_num'], info['total_qty'], f'{size_emoji}{size_lbl}'))
             try:
@@ -3449,7 +3465,8 @@ with tab8:
 
         # ── 송장별 우선순위 계산 ──
         # 핵심: 수량 많고 배대지 박스 수 적은 송장 = 빨리 완성 가능 = 우선순위 높음
-        ship_stats = {}  # ship_id → {qty, dapae_boxes: set, score}
+        import re as _re_ship
+        ship_stats = {}  # ship_id → {qty, dapae_boxes: set(str), score}
         for v in sort_state.values():
             for it in v['items']:
                 ship = it.get('ship')
@@ -3458,13 +3475,14 @@ with tab8:
                 bn_raw = it.get('box_num')
                 if bn_raw is None:
                     continue
-                bn_str = str(bn_raw).strip()
-                if not bn_str.isdigit():
+                bn_str = str(bn_raw).strip().upper()
+                if not bn_str or bn_str == 'NAN':
                     continue
-                bn_int = int(bn_str)
+                if not _re_ship.match(r'^[A-Z]*\d+$', bn_str):
+                    continue
                 ent = ship_stats.setdefault(ship, {'qty': 0, 'dapae_boxes': set()})
                 ent['qty'] += it['needed']
-                ent['dapae_boxes'].add(bn_int)
+                ent['dapae_boxes'].add(bn_str)
 
         # 송장 점수: 수량 / 배대지박스수 (수량당 효율)
         for ship, stats in ship_stats.items():
@@ -3488,7 +3506,7 @@ with tab8:
 
         # 1순위 송장 기반 추천 박스 안내
         if top_ship and top_stats:
-            top_boxes_sorted = sorted(top_stats['dapae_boxes'])
+            top_boxes_sorted = sorted(top_stats['dapae_boxes'], key=_box_sort_key)
             first_box = top_boxes_sorted[0] if top_boxes_sorted else None
             if first_box:
                 st.success(
@@ -3501,7 +3519,7 @@ with tab8:
         # 드롭다운 정렬: 박스 우선순위 점수 내림차순
         recommended_boxes = sorted(
             box_qty_map.items(),
-            key=lambda x: (-box_priority.get(x[0], (0, ''))[0], x[0])
+            key=lambda x: (-box_priority.get(x[0], (0, ''))[0], _box_sort_key(x[0]))
         )
         all_box_nums_sorted = [k for k, _ in recommended_boxes]
 
@@ -3653,11 +3671,11 @@ with tab8:
                     'detail': '수량을 입력한 후 상품 바코드를 스캔하세요',
                 }
 
-            # #N 바코드 → 박스 토글
+            # #W1, #M2, #1 바코드 → 박스 토글
             import re as _re_bc
-            box_label_match = _re_bc.match(r'^#(\d+)$', bc)
+            box_label_match = _re_bc.match(r'^#([A-Za-z]*\d+)$', bc)
             if box_label_match:
-                bn = int(box_label_match.group(1))
+                bn = box_label_match.group(1).upper()
                 if bn in box_qty_map:
                     cur = list(st.session_state.get('sort_active_boxes', []))
                     if bn in cur:
@@ -3694,15 +3712,15 @@ with tab8:
                         'detail': item_data['상품명'][:35]}
 
             # 활성 박스 집합 필터: 선택된 박스들 중에서만 유효
-            _active_boxes_set = set(st.session_state.get('sort_active_boxes', []))
+            _active_boxes_set = set(
+                str(b).strip().upper() for b in st.session_state.get('sort_active_boxes', [])
+            )
             if _active_boxes_set:
                 box_candidates = []
                 for it in candidates:
-                    try:
-                        if int(str(it.get('box_num', '')).strip()) in _active_boxes_set:
-                            box_candidates.append(it)
-                    except (ValueError, TypeError):
-                        pass
+                    it_bn = str(it.get('box_num', '')).strip().upper()
+                    if it_bn and it_bn in _active_boxes_set:
+                        box_candidates.append(it)
                 if not box_candidates:
                     # 이 상품이 활성 박스들에 없음 → 다른 박스에 있음
                     other_boxes = sorted(set(
@@ -3827,11 +3845,14 @@ with tab8:
                 18:'십팔',19:'십구',20:'이십',21:'이십일',22:'이십이',23:'이십삼',24:'이십사',
                 25:'이십오',26:'이십육',27:'이십칠',28:'이십팔',29:'이십구',30:'삼십',
             }
-            def _box_to_kor(n_str):
-                try:
-                    n = int(n_str)
-                except (ValueError, TypeError):
-                    return str(n_str)
+            _KOR_ALPHA = {
+                'W': '더블유', 'M': '엠', 'L': '엘', 'S': '에스',
+                'A': '에이', 'B': '비', 'C': '씨', 'D': '디', 'E': '이', 'F': '에프',
+                'G': '지', 'H': '에이치', 'I': '아이', 'J': '제이', 'K': '케이',
+                'N': '엔', 'O': '오', 'P': '피', 'Q': '큐', 'R': '알', 'T': '티',
+                'U': '유', 'V': '브이', 'X': '엑스', 'Y': '와이', 'Z': '지',
+            }
+            def _num_to_kor(n):
                 if n in _KOR_NUMS_SORT:
                     return _KOR_NUMS_SORT[n]
                 if n <= 99:
@@ -3840,6 +3861,20 @@ with tab8:
                     t_str = ('이삼사오육칠팔구'[tens - 2] if tens >= 2 else '') + '십'
                     return t_str + (_KOR_NUMS_SORT.get(ones, '') if ones else '')
                 return str(n)
+            def _box_to_kor(n_str):
+                """W1 → '더블유 일', M3 → '엠 삼', 1 → '일'"""
+                import re as _re_k
+                s = str(n_str).strip().upper()
+                m = _re_k.match(r'^([A-Z]*)(\d+)$', s)
+                if not m:
+                    return s
+                alpha_part = m.group(1)
+                num_part = int(m.group(2))
+                alpha_kor = ' '.join(_KOR_ALPHA.get(ch, ch) for ch in alpha_part)
+                num_kor = _num_to_kor(num_part)
+                if alpha_kor:
+                    return f'{alpha_kor} {num_kor}'
+                return num_kor
 
             if r['status'] == 'multi_trigger':
                 st.markdown(
@@ -3857,7 +3892,7 @@ with tab8:
                     f'</div>',
                     unsafe_allow_html=True)
                 _kor_bt = _box_to_kor(str(r['box_num']))
-                speak = f'{_kor_bt}번박스'
+                speak = f'{_kor_bt}번'
             elif r['status'] == 'error':
                 st.markdown(
                     f'<div class="scan-error"><strong style="font-size:1.4rem;">📥 보류</strong><br>'
@@ -3873,37 +3908,33 @@ with tab8:
                 st.markdown(f'<div class="scan-warning"><strong style="font-size:1.2rem;">{r["message"]}</strong><br>{r["detail"]}</div>', unsafe_allow_html=True)
                 speak = '분류 완료'
             else:
-                box_num_str = r['box_num']
+                box_num_str = str(r['box_num']).strip().upper()
                 kor_n = _box_to_kor(box_num_str)
-                try:
-                    _bn_int_r = int(str(box_num_str).strip())
-                    size_label, size_emoji = box_size_lookup.get(_bn_int_r, ('', ''))
-                except (ValueError, TypeError):
-                    size_label, size_emoji = '', ''
+                size_label, size_emoji = box_size_lookup.get(box_num_str, ('', ''))
                 size_str = f' ({size_emoji}{size_label}형)' if size_label else ''
                 if r.get('box_complete'):
                     # 박스 완료! 큰 알림 + 포장 안내
                     st.markdown(
                         f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
-                        f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번박스{size_str} 완료!</div>'
+                        f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번 {size_str} 완료!</div>'
                         f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
                         f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
                         f'</div>',
                         unsafe_allow_html=True)
-                    speak = f'{kor_n}번박스 완료. 포장하세요'
+                    speak = f'{kor_n}번 완료. 포장하세요'
                 else:
                     processed_qty = r.get('processed_qty', 1)
                     over_qty = r.get('over_qty', 0)
                     qty_str = f' × {processed_qty}개' if processed_qty > 1 else ''
                     over_str = f' ⚠️ {over_qty}개 초과' if over_qty > 0 else ''
                     st.markdown(
-                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번박스{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
+                        f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
                         f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개{over_str}</div>',
                         unsafe_allow_html=True)
                     if processed_qty > 1:
-                        speak = f'{kor_n}번박스 {processed_qty}개'
+                        speak = f'{kor_n}번 {processed_qty}개'
                     else:
-                        speak = f'{kor_n}번박스'
+                        speak = f'{kor_n}번'
 
             # 소리 + 음성
             speak_js = speak.replace("'", "\\'").replace('"', '\\"')
@@ -3956,7 +3987,7 @@ with tab8:
                     ent['sku_done'] += 1
 
         prog_rows = []
-        for key, ent in sorted(box_summary.items(), key=lambda x: (x[1]['sym'], int(x[1]['box_num']) if x[1]['box_num'].isdigit() else 0)):
+        for key, ent in sorted(box_summary.items(), key=lambda x: (x[1]['sym'], _box_sort_key(x[1]['box_num']))):
             pct = (ent['scanned'] / ent['needed'] * 100) if ent['needed'] else 0
             if ent['scanned'] >= ent['needed'] and ent['needed'] > 0:
                 status = '✅ 완료'
@@ -3964,11 +3995,8 @@ with tab8:
                 status = f'🔄 {pct:.0f}%'
             else:
                 status = '⬜ 대기'
-            try:
-                _bn_int_p = int(str(ent['box_num']).strip())
-                size_label, size_emoji = box_size_lookup.get(_bn_int_p, ('', ''))
-            except (ValueError, TypeError):
-                size_label, size_emoji = '', ''
+            _bn_key_p = str(ent['box_num']).strip().upper()
+            size_label, size_emoji = box_size_lookup.get(_bn_key_p, ('', ''))
             prog_rows.append({
                 '박스': f"{ent['box_num']}번",
                 '크기': f'{size_emoji}{size_label}' if size_label else '-',
