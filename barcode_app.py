@@ -357,15 +357,27 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
         bn_raw = str(it.get('boxNumber', '') or '').strip()
         if bn_raw and bn_raw not in box_nums_set:
             box_nums_set.append(bn_raw)
-    # ▲1(2), ▲2(5) 에서 숫자만 추출 (기호 ▲ 제거)
+    # ★W1(2), ★M3(5), ★1(2) 에서 박스번호 부분 추출
+    # 국내재고/국내부족 등은 제외
     import re as _re_bn
     box_labels = []
     for bn in box_nums_set:
-        m = _re_bn.search(r'(\d+)', bn)
+        # 국내재고, 국내부족, 부족 등 박스가 아닌 항목 제외
+        if any(kw in bn for kw in ('국내', '부족', 'RAW', '재고')):
+            continue
+        # 기호 + 영문(선택) + 숫자 형식만 매칭 (예: ★W1, ★M3, ★1)
+        m = _re_bn.search(r'([●★■▲◆◇○□△▼♦♠♣♥☆※·])([A-Za-z]*\d+)', bn)
         if m:
-            lbl = f'{m.group(1)}번'
+            lbl = f'{m.group(2).upper()}번'
             if lbl not in box_labels:
                 box_labels.append(lbl)
+        else:
+            # 기호 없이 영문+숫자만 있는 경우
+            m2 = _re_bn.match(r'^([A-Za-z]*\d+)', bn)
+            if m2:
+                lbl = f'{m2.group(1).upper()}번'
+                if lbl not in box_labels:
+                    box_labels.append(lbl)
     big_box_label = ' · '.join(box_labels) if box_labels else ''
 
     # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스(+바코드) ──────────
