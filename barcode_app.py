@@ -351,39 +351,14 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
         except Exception:
             barcode_flowable = None
 
-    # ── 이 쉽먼트의 박스번호 집계 (item['boxNumber']에서 고유값 추출) ──
-    box_nums_set = []
-    for it in items:
-        bn_raw = str(it.get('boxNumber', '') or '').strip()
-        if bn_raw and bn_raw not in box_nums_set:
-            box_nums_set.append(bn_raw)
-    # ★W1(2), ★M3(5), ★1(2) 에서 박스번호 부분 추출
-    # 국내재고/국내부족 등은 제외
-    import re as _re_bn
-    box_labels = []
-    for bn in box_nums_set:
-        # 국내재고, 국내부족, 부족 등 박스가 아닌 항목 제외
-        if any(kw in bn for kw in ('국내', '부족', 'RAW', '재고')):
-            continue
-        # 기호 + 영문(선택) + 숫자 형식만 매칭 (예: ★W1, ★M3, ★1)
-        m = _re_bn.search(r'([●★■▲◆◇○□△▼♦♠♣♥☆※·])([A-Za-z]*\d+)', bn)
-        if m:
-            lbl = f'{m.group(2).upper()}번'
-            if lbl not in box_labels:
-                box_labels.append(lbl)
-        else:
-            # 기호 없이 영문+숫자만 있는 경우
-            m2 = _re_bn.match(r'^([A-Za-z]*\d+)', bn)
-            if m2:
-                lbl = f'{m2.group(1).upper()}번'
-                if lbl not in box_labels:
-                    box_labels.append(lbl)
-    big_box_label = ' · '.join(box_labels) if box_labels else ''
+    # ── 상단 큰 박스번호 표시 ──
+    # 호출 시 box_number 인자로 전달된 값을 사용 (자동 부여된 송장별 박스번호)
+    # 송장 전체가 국내재고인 경우 box_number=None이 전달되어 표시되지 않음
+    big_box_label = f'{box_number}번' if box_number else ''
 
-    # ── 헤더: 좌측 타이틀 + 우측 쉽먼트/박스(+바코드) ──────────
-    if shipment_id and box_number:
-        shipment_text = f'쉽먼트 {shipment_id} | 박스 {box_number}'
-    elif shipment_id:
+    # ── 헤더: 좌측 타이틀 + 우측 쉽먼트(+바코드) ──────────
+    # 박스번호는 좌측 상단에 이미 표시되므로 우측에는 쉽먼트 ID만
+    if shipment_id:
         shipment_text = f'쉽먼트 {shipment_id}'
     else:
         shipment_text = ''
@@ -579,6 +554,38 @@ def merge_pdfs(pdf_buffers):
     writer.write(out)
     out.seek(0)
     return out
+
+
+def assign_box_numbers(items):
+    """items에서 쉽먼트(송장)별로 박스번호 자동 부여.
+    정렬 기준: 입고예정일 > 물류센터 > 송장번호
+    송장 전체가 국내재고/부족일 때만 제외 (일부만 국내재고면 부여).
+    반환: {송장번호: 박스번호(int)} 딕셔너리
+    """
+    if not items:
+        return {}
+    ship_info = {}   # ship → (expectedDate, center, ship)
+    ship_valid = {}  # ship → 하나라도 유효한 박스가 있으면 True
+    for it in items:
+        ship = str(it.get('shipmentNumber', '') or '').strip()
+        if not ship:
+            continue
+        bn_raw = str(it.get('boxNumber', '') or '').strip()
+        is_domestic = bool(bn_raw) and any(kw in bn_raw for kw in ('국내', '부족', '재고', 'RAW'))
+        has_valid_box = bool(bn_raw) and not is_domestic
+        if ship not in ship_info:
+            center = str(it.get('logisticsCenter', '') or '').strip()
+            edate = str(it.get('expectedDate', '') or '').strip()
+            ship_info[ship] = (edate, center, ship)
+            ship_valid[ship] = has_valid_box
+        else:
+            # 하나라도 유효하면 True로 유지
+            if has_valid_box:
+                ship_valid[ship] = True
+    valid_ships = {s: info for s, info in ship_info.items() if ship_valid.get(s, False)}
+    # 정렬: 입고예정일 → 물류센터 → 송장번호
+    sorted_ships = sorted(valid_ships.values(), key=lambda x: (x[0], x[1], x[2]))
+    return {s[2]: idx + 1 for idx, s in enumerate(sorted_ships)}
 
 
 def create_shipment_barcodes_pdf(shipment_numbers):
@@ -2342,13 +2349,20 @@ with tab6:
                                     x.get('productName', '')
                                 ))
 
+                            # 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호 정렬)
+                            all_items_for_box = []
+                            for inv_num, inv_items in grouped.items():
+                                all_items_for_box.extend(inv_items)
+                            ship_to_box_num = assign_box_numbers(all_items_for_box)
+
                             all_so_bufs = []
                             for inv_num in sorted(grouped.keys()):
                                 inv_items = grouped[inv_num]
-                                ship_id, box_num = invoice_mapping.get(inv_num, (None, None))
+                                ship_id, _ = invoice_mapping.get(inv_num, (None, None))
+                                auto_box_num = ship_to_box_num.get(inv_num)
                                 center = inv_items[0].get('logisticsCenter', '')
                                 gk = f"{center}_{inv_num}" if center else inv_num
-                                pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, box_num)
+                                pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, auto_box_num)
                                 so_by_invoice[inv_num] = pdf_buf
                                 all_so_bufs.append(pdf_buf)
 
@@ -2704,12 +2718,19 @@ with tab7:
                     rp_so_by_invoice = {}
                     all_so_bufs = []
 
+                    # 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호 정렬)
+                    rp_all_items = []
+                    for inv_num in sorted(matched):
+                        rp_all_items.extend(rp_grouped[inv_num])
+                    rp_ship_to_box_num = assign_box_numbers(rp_all_items)
+
                     for inv_num in sorted(matched):
                         inv_items = rp_grouped[inv_num]
-                        ship_id, box_num = rp_invoice_mapping.get(inv_num, (None, None))
+                        ship_id, _ = rp_invoice_mapping.get(inv_num, (None, None))
+                        auto_box_num = rp_ship_to_box_num.get(inv_num)
                         center = inv_items[0].get('logisticsCenter', '')
                         gk = f"{center}_{inv_num}" if center else inv_num
-                        pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, box_num)
+                        pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, auto_box_num)
                         rp_so_by_invoice[inv_num] = pdf_buf
                         all_so_bufs.append(pdf_buf)
 
@@ -3298,30 +3319,40 @@ with tab8:
     elif work_mode == "📥 입고 분류":
         import pandas as _pd2
         df_sort = st.session_state.pick_df_출고
-        if "박스넘버" not in df_sort.columns:
-            st.error('출고지시서에 "박스번호" 컬럼이 없거나 파싱 실패했습니다. (예: ▲1(2))')
-            st.stop()
 
+        # ── 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호) ──
+        # df_sort → items 리스트로 변환하여 assign_box_numbers 재활용
+        sort_items_for_box = []
+        for _, row in df_sort.iterrows():
+            sort_items_for_box.append({
+                'shipmentNumber': str(row.get('쉽먼트운송장번호', '') or '').strip(),
+                'logisticsCenter': str(row.get('물류센터(FC)', '') or '').strip(),
+                'expectedDate': str(row.get('입고예정일(EDD)', '') or row.get('입고예정일', '') or '').strip(),
+                'boxNumber': str(row.get('박스번호', '') or '').strip(),
+            })
+        sort_ship_to_box = assign_box_numbers(sort_items_for_box)
 
         # ── 바코드 → (박스번호, 수량, 상품명, 송장) 매핑 ──
         def _build_sort_state():
-            state = {}  # barcode → {상품명, items: [{box_num, sym, ship, needed, scanned}]}
+            state = {}  # barcode → {상품명, items: [{box_num, ship, needed, scanned}]}
             for _, row in df_sort.iterrows():
                 bc = str(row.get('바코드', '')).strip()
-                box_num = str(row.get('박스넘버') or '').strip()
-                sym = str(row.get('회차기호') or '').strip()
                 ship = str(row.get('쉽먼트운송장번호', '')).strip()
                 qty = int(row.get('수량', 0) or 0)
                 name = str(row.get('상품명', '')).strip()
-                if not bc or not box_num or qty <= 0:
+                if not bc or not ship or qty <= 0:
                     continue
-                key = f"{sym}{box_num}" if sym else box_num
+                # 자동 부여된 박스번호 사용 (국내재고 전용 송장은 None)
+                auto_box = sort_ship_to_box.get(ship)
+                if auto_box is None:
+                    continue  # 국내재고/부족 전용 송장은 박스 분류 제외
+                box_num_str = str(auto_box)
                 if bc not in state:
                     state[bc] = {'상품명': name, 'items': []}
                 state[bc]['items'].append({
-                    'box_key': key,
-                    'box_num': box_num,
-                    'sym': sym,
+                    'box_key': box_num_str,
+                    'box_num': box_num_str,
+                    'sym': '',
                     'ship': ship,
                     'needed': qty,
                     'scanned': 0,
