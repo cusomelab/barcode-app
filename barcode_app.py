@@ -765,40 +765,10 @@ def create_box_labels_pdf(box_entries):
 
 
 def create_multi_trigger_label_pdf():
-    """다량 입력 트리거 바코드(#MULTI) A4 한 장짜리 PDF"""
-    from reportlab.pdfgen import canvas as _canvas
-    from reportlab.lib.pagesizes import A4 as _A4
-    from reportlab.lib.units import mm as _mm
-    from reportlab.lib.utils import ImageReader as _ImageReader
-
-    buf = io.BytesIO()
-    c = _canvas.Canvas(buf, pagesize=_A4)
-    page_w, page_h = _A4
-
-    barcode_text = '#MULTI'
-    try:
-        bc_img = get_barcode_img(barcode_text, write_text=False)
-        bc_buf = io.BytesIO()
-        bc_img.save(bc_buf, format='PNG')
-        bc_buf.seek(0)
-        bc_w = 160 * _mm
-        bc_h = 80 * _mm
-        x = (page_w - bc_w) / 2
-        y = (page_h - bc_h) / 2
-        c.drawImage(
-            _ImageReader(bc_buf),
-            x, y,
-            width=bc_w,
-            height=bc_h,
-            preserveAspectRatio=False,
-            mask='auto',
-        )
-    except Exception:
-        pass
-
-    c.save()
-    buf.seek(0)
-    return buf
+    """다량 입력 트리거 바코드(#MULTI) 폼텍 3100 형식 A4 1장 (65칸 동일 바코드)"""
+    # create_box_labels_pdf 재활용: 65개 동일 엔트리
+    entries = [('MULTI', '', '다량')] * 65
+    return create_box_labels_pdf(entries)
 
 
 # ══════════════════════════════════════════════════════
