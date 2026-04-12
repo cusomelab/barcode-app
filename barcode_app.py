@@ -2581,26 +2581,17 @@ with tab7:
 
     if reprint_files:
         rp_csv = None
-        rp_manifests = {}
-        rp_labels = {}
+        rp_manifest_files = []  # [(파일명, 파일)]
+        rp_label_files = []     # [(파일명, 파일)]
 
         for f in reprint_files:
             fname = f.name.lower()
             if fname.endswith('.csv') or fname.endswith('.xlsx'):
                 rp_csv = f
             elif 'manifest' in fname:
-                sid = re.search(r'\((\d+)\)', f.name)
-                if sid:
-                    rp_manifests[sid.group(1)] = f
+                rp_manifest_files.append((f.name, f))
             elif 'label' in fname:
-                sid = re.search(r'\((\d+)\)', f.name)
-                if sid:
-                    rp_labels[sid.group(1)] = f
-
-        rp_pairs = []
-        for sid in sorted(rp_manifests.keys()):
-            if sid in rp_labels:
-                rp_pairs.append((sid, rp_manifests[sid], rp_labels[sid]))
+                rp_label_files.append((f.name, f))
 
         st.markdown(f'**분류 결과:**')
         if rp_csv:
@@ -2608,22 +2599,14 @@ with tab7:
         else:
             st.error('⚠️ CSV 파일은 필수입니다. 송장번호 매칭에 사용됩니다.')
 
-        st.markdown(f'- 쉽먼트 세트: **{len(rp_pairs)}개**')
-        for sid, m, l in rp_pairs:
-            st.markdown(f'  - `[{sid}]` {m.name} + {l.name}')
-
-        for sid in rp_manifests:
-            if sid not in rp_labels:
-                st.warning(f'쉽먼트 {sid}: 매니페스트만 있고 라벨 없음')
-        for sid in rp_labels:
-            if sid not in rp_manifests:
-                st.warning(f'쉽먼트 {sid}: 라벨만 있고 매니페스트 없음')
+        st.markdown(f'- 매니페스트 PDF: **{len(rp_manifest_files)}개**')
+        st.markdown(f'- 라벨 PDF: **{len(rp_label_files)}개**')
 
         if not rp_csv:
             st.stop()
 
-        if not rp_pairs:
-            st.error('매칭되는 매니페스트/라벨 세트가 없습니다.')
+        if not rp_manifest_files and not rp_label_files:
+            st.error('매니페스트 또는 라벨 PDF가 필요합니다.')
         else:
             st.divider()
 
@@ -2663,39 +2646,46 @@ with tab7:
                     st.info(f'CSV 송장번호: **{len(csv_invoices)}건** 감지')
                     rp_progress.progress(0.2)
 
-                    # ===== 2. 매니페스트/라벨 분석 =====
+                    # ===== 2. 매니페스트/라벨 분석 (파일명 쌍 매칭 없이 독립 처리) =====
                     rp_status.text('📊 매니페스트/라벨 분석 중...')
-                    rp_manifest_data = {}
-                    rp_label_data = {}
-                    rp_invoice_mapping = {}
-
-                    for sid, mf, lf in rp_pairs:
+                    # 매니페스트: [(bytes, sorted_groups), ...]
+                    rp_manifest_data = []
+                    for fname, mf in rp_manifest_files:
                         m_bytes = mf.read(); mf.seek(0)
                         m_info = _extract_manifest_info(m_bytes)
                         m_groups = _group_manifest_pages(m_info)
                         sorted_m = sorted(m_groups, key=lambda g: g['invoice_number'] or '')
-                        rp_manifest_data[sid] = (m_bytes, sorted_m)
-
-                        for g in sorted_m:
-                            if g['invoice_number']:
-                                rp_invoice_mapping[g['invoice_number']] = (sid, g['box_number'])
-
+                        rp_manifest_data.append((m_bytes, sorted_m))
+                    # 라벨: [(bytes, sorted_groups), ...]
+                    rp_label_data = []
+                    for fname, lf in rp_label_files:
                         l_bytes = lf.read(); lf.seek(0)
                         l_info = _extract_label_info(l_bytes)
                         l_groups = _group_label_pages(l_info)
                         sorted_l = sorted(l_groups, key=lambda g: g['invoice_number'] or '')
-                        rp_label_data[sid] = (l_bytes, sorted_l)
+                        rp_label_data.append((l_bytes, sorted_l))
 
                     rp_progress.progress(0.4)
 
                     # ===== 3. 매칭 결과 확인 =====
-                    all_manifest_invoices = set(rp_invoice_mapping.keys())
-                    matched = csv_invoices & all_manifest_invoices
-                    not_in_manifest = csv_invoices - all_manifest_invoices
-                    not_in_csv = all_manifest_invoices - csv_invoices
+                    all_manifest_invoices = set()
+                    for _, sorted_m in rp_manifest_data:
+                        for g in sorted_m:
+                            if g['invoice_number']:
+                                all_manifest_invoices.add(g['invoice_number'])
+                    all_label_invoices = set()
+                    for _, sorted_l in rp_label_data:
+                        for g in sorted_l:
+                            if g['invoice_number']:
+                                all_label_invoices.add(g['invoice_number'])
+
+                    all_pdf_invoices = all_manifest_invoices | all_label_invoices
+                    matched = csv_invoices & all_pdf_invoices
+                    not_in_manifest = csv_invoices - all_pdf_invoices
+                    not_in_csv = all_pdf_invoices - csv_invoices
 
                     if not matched:
-                        st.error('CSV와 매니페스트 간 매칭되는 송장번호가 없습니다.')
+                        st.error('CSV와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.')
                         st.stop()
 
                     col_m1, col_m2, col_m3 = st.columns(3)
@@ -2716,7 +2706,6 @@ with tab7:
                     # ===== 4. 출고지시서 생성 (매칭된 송장만) =====
                     rp_status.text('📄 출고지시서 생성 중...')
                     rp_so_by_invoice = {}
-                    all_so_bufs = []
 
                     # 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호 정렬)
                     rp_all_items = []
@@ -2726,13 +2715,11 @@ with tab7:
 
                     for inv_num in sorted(matched):
                         inv_items = rp_grouped[inv_num]
-                        ship_id, _ = rp_invoice_mapping.get(inv_num, (None, None))
                         auto_box_num = rp_ship_to_box_num.get(inv_num)
                         center = inv_items[0].get('logisticsCenter', '')
                         gk = f"{center}_{inv_num}" if center else inv_num
-                        pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, auto_box_num)
+                        pdf_buf = create_work_order_pdf(gk, inv_items, inv_num, auto_box_num)
                         rp_so_by_invoice[inv_num] = pdf_buf
-                        all_so_bufs.append(pdf_buf)
 
                     rp_progress.progress(0.6)
 
@@ -2746,50 +2733,57 @@ with tab7:
                     rp_shipment_total = 0
                     rp_so_total = 0
 
-                    # 송장별 라벨 그룹 매핑
-                    rp_label_by_inv = {}
-                    for sid, mf, lf in rp_pairs:
-                        l_bytes, sorted_l = rp_label_data[sid]
-                        inv_map = {}
-                        for g in sorted_l:
-                            inv = g['invoice_number'] or ''
-                            if inv in matched:
-                                inv_map.setdefault(inv, []).append(g)
-                        rp_label_by_inv[sid] = inv_map
-
-                    for sid, mf, lf in rp_pairs:
-                        m_bytes, sorted_m = rp_manifest_data[sid]
-                        m_reader = PdfReader(io.BytesIO(m_bytes))
-                        l_bytes, sorted_l = rp_label_data[sid]
-
+                    # 송장번호별로 매니페스트 페이지 인덱스 매핑
+                    # {invoice: [(m_bytes, [page_indices]), ...]}
+                    manifest_pages_by_inv = {}
+                    for m_bytes, sorted_m in rp_manifest_data:
                         for g in sorted_m:
                             inv = g['invoice_number']
-                            if inv not in matched:
+                            if not inv or inv not in matched:
                                 continue
+                            manifest_pages_by_inv.setdefault(inv, []).append((m_bytes, g['page_indices']))
 
-                            # 출고지시서 (전체통합 + 출고지시서만)
-                            if inv in rp_so_by_invoice:
-                                so_buf = rp_so_by_invoice[inv]
-                                so_buf.seek(0)
-                                so_reader = PdfReader(so_buf)
-                                for page in so_reader.pages:
-                                    rp_final_writer.add_page(page)
-                                    rp_so_only_writer.add_page(page)
-                                rp_total += len(so_reader.pages)
-                                rp_so_total += len(so_reader.pages)
+                    # 송장번호별로 라벨 그룹 매핑
+                    # {invoice: [(l_bytes, group), ...]}
+                    label_groups_by_inv = {}
+                    for l_bytes, sorted_l in rp_label_data:
+                        for g in sorted_l:
+                            inv = g['invoice_number']
+                            if not inv or inv not in matched:
+                                continue
+                            label_groups_by_inv.setdefault(inv, []).append((l_bytes, g))
 
-                            # 매니페스트 (전체통합 + 쉽먼트만)
-                            for pidx in g['page_indices']:
+                    # 매칭된 송장 순서대로 처리: [출고지시서 → 매니페스트 → 라벨]
+                    for inv_num in sorted(matched):
+                        # 출고지시서 (전체통합 + 출고지시서만)
+                        if inv_num in rp_so_by_invoice:
+                            so_buf = rp_so_by_invoice[inv_num]
+                            so_buf.seek(0)
+                            so_reader = PdfReader(so_buf)
+                            for page in so_reader.pages:
+                                rp_final_writer.add_page(page)
+                                rp_so_only_writer.add_page(page)
+                            rp_total += len(so_reader.pages)
+                            rp_so_total += len(so_reader.pages)
+
+                        # 매니페스트 (전체통합 + 쉽먼트만)
+                        for m_bytes, page_indices in manifest_pages_by_inv.get(inv_num, []):
+                            m_reader = PdfReader(io.BytesIO(m_bytes))
+                            for pidx in page_indices:
                                 rp_final_writer.add_page(m_reader.pages[pidx])
                                 rp_shipment_only_writer.add_page(m_reader.pages[pidx])
                                 rp_total += 1
                                 rp_shipment_total += 1
 
-                            # 라벨 (전체통합 + 쉽먼트만)
-                            inv_key = inv or ''
-                            if inv_key in rp_label_by_inv.get(sid, {}):
-                                inv_label_groups = rp_label_by_inv[sid].pop(inv_key)
-                                four_up = _render_labels_4up(l_bytes, inv_label_groups)
+                        # 라벨 (전체통합 + 쉽먼트만)
+                        # label_bytes별로 묶어서 _render_labels_4up 한 번씩 호출
+                        inv_label_list = label_groups_by_inv.get(inv_num, [])
+                        if inv_label_list:
+                            grouped_by_lbytes = {}
+                            for l_bytes, grp in inv_label_list:
+                                grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
+                            for _, (l_bytes, groups) in grouped_by_lbytes.items():
+                                four_up = _render_labels_4up(l_bytes, groups)
                                 for img in four_up:
                                     img_buf = io.BytesIO()
                                     img.save(img_buf, format='PDF', resolution=300)
