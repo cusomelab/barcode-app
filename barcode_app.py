@@ -3477,7 +3477,7 @@ with tab8:
                 },
             ]
             st.dataframe(_pd2.DataFrame(size_rows), use_container_width=True, hide_index=True)
-            st.caption(f'💡 총 {len(all_box_keys)}개 박스 준비 ・ 박스 옆 괄호는 들어갈 총 수량')
+            st.caption(f'💡 총 {len(out_box_map)}개 박스 준비 ・ 박스 옆 괄호는 들어갈 총 수량')
 
             # ── 폼텍 3100 라벨 PDF 다운로드 (송장박스 1~N번) ──
             label_entries = []
