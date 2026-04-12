@@ -3538,10 +3538,12 @@ with tab8:
         if box_qty_map:
             top_box_key = max(box_qty_map.keys(), key=lambda k: box_qty_map[k]['total_qty'])
             top_info = box_qty_map[top_box_key]
+            top_out_boxes = sorted(top_info['out_boxes'], key=_box_sort_key)
+            out_box_str = ', '.join(f'{b}번' for b in top_out_boxes)
             st.success(
                 f'🏆 **우선 작업 추천**: **{top_box_key} 박스부터 열어주세요**\n\n'
-                f'→ 수량 {top_info["total_qty"]}개, 출고박스 {len(top_info["out_boxes"])}개로 분배 '
-                f'(송장 {len(top_info["ships"])}개)'
+                f'→ 수량 {top_info["total_qty"]}개\n\n'
+                f'📦 **준비할 출고박스 ({len(top_out_boxes)}개)**: {out_box_str}'
             )
             top_box = top_box_key
 
@@ -3630,12 +3632,21 @@ with tab8:
                 st.rerun()
 
         if active_boxes:
-            parts = []
-            for b in sorted(active_boxes):
+            # 활성 박스별로 필요한 출고박스 번호 상세 표시
+            active_info_lines = []
+            all_needed_out_boxes = set()
+            for b in sorted(active_boxes, key=_box_sort_key):
                 info = box_qty_map[b]
                 size_lbl, size_emo = _box_size(info['total_qty'])
-                parts.append(f'{b}번({size_emo}{size_lbl},{info["total_qty"]}개)')
-            st.info(f'📦 활성 박스 {len(active_boxes)}개: ' + ' / '.join(parts))
+                out_boxes = sorted(info['out_boxes'], key=_box_sort_key)
+                all_needed_out_boxes.update(info['out_boxes'])
+                ob_str = ', '.join(f'{o}번' for o in out_boxes)
+                active_info_lines.append(
+                    f"**{b} 박스** ({size_emo}{size_lbl}, {info['total_qty']}개) → **출고박스**: {ob_str}"
+                )
+            total_out_count = len(all_needed_out_boxes)
+            header = f'📦 **활성 배대지 박스 {len(active_boxes)}개 — 준비할 출고박스 총 {total_out_count}개**'
+            st.info(header + '\n\n' + '\n\n'.join(active_info_lines))
 
         st.markdown('---')
 
