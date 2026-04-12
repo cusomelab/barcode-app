@@ -3326,9 +3326,9 @@ with tab8:
             })
         sort_ship_to_box = assign_box_numbers(sort_items_for_box)
 
-        # ── 바코드 → (박스번호, 수량, 상품명, 송장) 매핑 ──
+        # ── 바코드 → (배대지박스, 송장박스, 수량, 상품명, 송장) 매핑 ──
         def _build_sort_state():
-            state = {}  # barcode → {상품명, items: [{box_num, ship, needed, scanned}]}
+            state = {}  # barcode → {상품명, items: [{dapae_box, out_box, ship, needed, scanned}]}
             for _, row in df_sort.iterrows():
                 bc = str(row.get('바코드', '')).strip()
                 ship = str(row.get('쉽먼트운송장번호', '')).strip()
@@ -3336,16 +3336,21 @@ with tab8:
                 name = str(row.get('상품명', '')).strip()
                 if not bc or not ship or qty <= 0:
                     continue
-                # 자동 부여된 박스번호 사용 (국내재고 전용 송장은 None)
-                auto_box = sort_ship_to_box.get(ship)
-                if auto_box is None:
+                # 출고 박스번호 (송장별 자동 부여, 국내재고 전용 송장은 None)
+                out_box = sort_ship_to_box.get(ship)
+                if out_box is None:
                     continue  # 국내재고/부족 전용 송장은 박스 분류 제외
-                box_num_str = str(auto_box)
+                # 배대지 박스번호 (K열에서 파싱한 값: M1, W3 등)
+                dapae_raw = str(row.get('박스넘버') or '').strip().upper()
+                if not dapae_raw or dapae_raw == 'NAN':
+                    dapae_raw = ''
                 if bc not in state:
                     state[bc] = {'상품명': name, 'items': []}
                 state[bc]['items'].append({
-                    'box_key': box_num_str,
-                    'box_num': box_num_str,
+                    'out_box': str(out_box),      # 출고 박스번호 (1~58번)
+                    'dapae_box': dapae_raw,       # 배대지 박스번호 (M1, W3 등)
+                    'box_num': str(out_box),      # 기존 코드 호환: 음성/화면 안내용
+                    'box_key': str(out_box),      # 기존 코드 호환
                     'sym': '',
                     'ship': ship,
                     'needed': qty,
@@ -3362,30 +3367,41 @@ with tab8:
 
         sort_state = st.session_state.sort_state
 
-        # ── 박스별 총 수량 집계 (크기 분류용) ──
-        # box_num이 실제 숫자로 파싱되는 박스만 집계 (국내재고/부족 등은 제외)
-        # box_num은 'W1', 'M3' 같은 문자열 또는 '1', '2' 같은 숫자 문자열
+        # ── 배대지 박스별 집계 (작업 순서 추천용) ──
+        # 배대지 박스 = K열에서 파싱된 M1, W3 등 (작업자가 물리적으로 열 박스)
         import re as _re_bq
-        box_qty_map = {}  # box_num(str) → {box_num, sym, total_qty, ships}
+        box_qty_map = {}  # dapae_box → {box_num, total_qty, ships, out_boxes}
         for v in sort_state.values():
             for it in v['items']:
-                bn_raw = it.get('box_num')
-                if bn_raw is None:
+                dp = str(it.get('dapae_box', '')).strip().upper()
+                if not dp or dp == 'NAN':
                     continue
-                bn_str = str(bn_raw).strip().upper()
-                # 유효한 박스번호: 영문+숫자 또는 숫자만 (국내재고/부족 등 제외)
-                if not bn_str or bn_str == 'NAN':
+                if not _re_bq.match(r'^[A-Z]*\d+$', dp):
                     continue
-                if not _re_bq.match(r'^[A-Z]*\d+$', bn_str):
-                    continue
-                key = bn_str
-                ent = box_qty_map.setdefault(key, {
-                    'box_num': bn_str, 'sym': it.get('sym', ''),
-                    'total_qty': 0, 'ships': set(),
+                ent = box_qty_map.setdefault(dp, {
+                    'box_num': dp, 'sym': '',
+                    'total_qty': 0, 'ships': set(), 'out_boxes': set(),
                 })
                 ent['total_qty'] += it['needed']
                 if it.get('ship'):
                     ent['ships'].add(it['ship'])
+                if it.get('out_box'):
+                    ent['out_boxes'].add(it['out_box'])
+
+        # ── 출고(송장) 박스별 집계 (라벨 PDF / 크기 분류용) ──
+        # 송장박스 = 1~58번 (우리가 준비하는 박스, 사용자 라벨 부착용)
+        out_box_map = {}  # out_box(str) → {box_num, total_qty, ship}
+        for v in sort_state.values():
+            for it in v['items']:
+                ob = str(it.get('out_box', '')).strip()
+                if not ob or not ob.isdigit():
+                    continue
+                ent = out_box_map.setdefault(ob, {
+                    'box_num': ob,
+                    'total_qty': 0,
+                    'ship': it.get('ship', ''),
+                })
+                ent['total_qty'] += it['needed']
 
         def _box_size(qty):
             """수량 기준으로 박스 크기 분류"""
@@ -3406,11 +3422,11 @@ with tab8:
                 return (m.group(1), int(m.group(2)))
             return (str(box_str), 0)
 
-        # 박스 크기별 그룹
-        boxes_large = []  # [(sort_key, box_num_str, qty)]
+        # 송장(출고) 박스 크기별 그룹 (우리가 준비할 박스 기준)
+        boxes_large = []
         boxes_med = []
         boxes_small = []
-        for key, info in box_qty_map.items():
+        for key, info in out_box_map.items():
             size_label, _ = _box_size(info['total_qty'])
             entry = (_box_sort_key(key), info['box_num'], info['total_qty'])
             if size_label == '대':
@@ -3423,19 +3439,18 @@ with tab8:
         boxes_med.sort()
         boxes_small.sort()
 
-        # 박스 크기 매핑 (스캔 결과 표시용)
-        box_size_lookup = {}  # box_key → (size_label, emoji)
-        for key, info in box_qty_map.items():
+        # 송장 박스 크기 매핑 (스캔 결과 표시용)
+        box_size_lookup = {}  # out_box → (size_label, emoji)
+        for key, info in out_box_map.items():
             box_size_lookup[key] = _box_size(info['total_qty'])
 
         # ── 상단 요약 ──
         total_qty = sum(it['needed'] for v in sort_state.values() for it in v['items'])
         total_scanned = sum(it['scanned'] for v in sort_state.values() for it in v['items'])
-        all_box_keys = set(box_qty_map.keys())
 
         hh1, hh2, hh3, hh4 = st.columns(4)
-        hh1.metric('총 박스', f'{len(all_box_keys)}개')
-        hh2.metric('총 SKU', f'{len(sort_state)}종')
+        hh1.metric('출고박스', f'{len(out_box_map)}개')
+        hh2.metric('배대지박스', f'{len(box_qty_map)}개')
         hh3.metric('스캔 진행', f'{total_scanned}/{total_qty}')
         hh4.metric('진행률', f'{(total_scanned/total_qty*100 if total_qty else 0):.0f}%')
 
@@ -3464,10 +3479,9 @@ with tab8:
             st.dataframe(_pd2.DataFrame(size_rows), use_container_width=True, hide_index=True)
             st.caption(f'💡 총 {len(all_box_keys)}개 박스 준비 ・ 박스 옆 괄호는 들어갈 총 수량')
 
-            # ── 폼텍 3100 라벨 PDF 다운로드 ──
+            # ── 폼텍 3100 라벨 PDF 다운로드 (송장박스 1~N번) ──
             label_entries = []
-            # 박스번호 → 사이즈 라벨 매핑 (W1, M3 등 문자열 지원)
-            for key, info in sorted(box_qty_map.items(),
+            for key, info in sorted(out_box_map.items(),
                                     key=lambda x: _box_sort_key(x[1]['box_num'])):
                 size_lbl, size_emoji = _box_size(info['total_qty'])
                 label_entries.append((info['box_num'], info['total_qty'], f'{size_emoji}{size_lbl}'))
@@ -3500,63 +3514,41 @@ with tab8:
             except Exception as _e:
                 st.caption(f'트리거 라벨 생성 오류: {_e}')
 
-        # ── 송장별 우선순위 계산 ──
-        # 핵심: 수량 많고 배대지 박스 수 적은 송장 = 빨리 완성 가능 = 우선순위 높음
+        # ── 송장별 필요 배대지 박스 집계 (집합 커버 계산용) ──
+        # 각 송장이 어느 배대지 박스에 있는지: {송장: {배대지박스 set}}
         import re as _re_ship
-        ship_stats = {}  # ship_id → {qty, dapae_boxes: set(str), score}
+        ship_need_boxes = {}  # ship_id → set of dapae_box
         for v in sort_state.values():
             for it in v['items']:
                 ship = it.get('ship')
                 if not ship:
                     continue
-                bn_raw = it.get('box_num')
-                if bn_raw is None:
+                dp = str(it.get('dapae_box', '')).strip().upper()
+                if not dp or dp == 'NAN':
                     continue
-                bn_str = str(bn_raw).strip().upper()
-                if not bn_str or bn_str == 'NAN':
+                if not _re_ship.match(r'^[A-Z]*\d+$', dp):
                     continue
-                if not _re_ship.match(r'^[A-Z]*\d+$', bn_str):
-                    continue
-                ent = ship_stats.setdefault(ship, {'qty': 0, 'dapae_boxes': set()})
-                ent['qty'] += it['needed']
-                ent['dapae_boxes'].add(bn_str)
-
-        # 송장 점수: 수량 / 배대지박스수 (수량당 효율)
-        for ship, stats in ship_stats.items():
-            stats['score'] = stats['qty'] / max(len(stats['dapae_boxes']), 1)
-
-        # 각 배대지 박스의 우선순위 = 그 박스에 포함된 최고 송장 점수
-        box_priority = {}  # box_num → (best_score, best_ship)
-        for ship, stats in ship_stats.items():
-            for bn in stats['dapae_boxes']:
-                if bn not in box_priority or box_priority[bn][0] < stats['score']:
-                    box_priority[bn] = (stats['score'], ship)
-
-        # 1순위 송장 찾기 (가장 높은 점수)
-        top_ship = None
-        top_stats = None
-        if ship_stats:
-            top_ship, top_stats = max(ship_stats.items(), key=lambda x: x[1]['score'])
+                ship_need_boxes.setdefault(ship, set()).add(dp)
 
         # ── 시작 박스 지정 ──
         st.markdown('### 🎯 작업할 배대지 박스')
 
-        # 1순위 송장 기반 추천 박스 안내
-        if top_ship and top_stats:
-            top_boxes_sorted = sorted(top_stats['dapae_boxes'], key=_box_sort_key)
-            first_box = top_boxes_sorted[0] if top_boxes_sorted else None
-            if first_box:
-                st.success(
-                    f'🏆 **우선 작업 추천**: **{first_box}번 박스부터 열어주세요**\n\n'
-                    f'→ 송장 `{top_ship[-6:]}` ({top_stats["qty"]}개, '
-                    f'배대지 박스 {len(top_boxes_sorted)}개: '
-                    f'{", ".join(str(b)+"번" for b in top_boxes_sorted)}) 를 가장 빨리 완성 가능'
-                )
+        # 1순위 추천: 수량이 가장 많은 배대지 박스부터 (빨리 비우고 공간 확보)
+        top_box = None
+        if box_qty_map:
+            top_box_key = max(box_qty_map.keys(), key=lambda k: box_qty_map[k]['total_qty'])
+            top_info = box_qty_map[top_box_key]
+            st.success(
+                f'🏆 **우선 작업 추천**: **{top_box_key} 박스부터 열어주세요**\n\n'
+                f'→ 수량 {top_info["total_qty"]}개, 출고박스 {len(top_info["out_boxes"])}개로 분배 '
+                f'(송장 {len(top_info["ships"])}개)'
+            )
+            top_box = top_box_key
 
-        # 드롭다운 정렬: 박스 우선순위 점수 내림차순
+        # 드롭다운 정렬: 수량 많은 배대지 박스 내림차순
         recommended_boxes = sorted(
             box_qty_map.items(),
-            key=lambda x: (-box_priority.get(x[0], (0, ''))[0], _box_sort_key(x[0]))
+            key=lambda x: (-x[1]['total_qty'], _box_sort_key(x[0]))
         )
         all_box_nums_sorted = [k for k, _ in recommended_boxes]
 
@@ -3576,9 +3568,8 @@ with tab8:
                 help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수',
             )
 
-        # 집합 커버 추천 (Greedy): 지정한 개수의 박스로 최대한 많은 송장 완성
+        # 집합 커버 추천: 수량 많은 배대지 박스부터 + 송장 완성 많이 되는 것 우선
         def _recommend_box_set(target_count, already_committed=None):
-            ship_need = {s: set(stats['dapae_boxes']) for s, stats in ship_stats.items()}
             committed = set(already_committed or [])
             picks = []
             available = set(box_qty_map.keys()) - committed
@@ -3587,9 +3578,10 @@ with tab8:
                 best_score = (-1, -1)
                 for box in available:
                     trial = committed | set(picks) | {box}
-                    completed = sum(1 for need in ship_need.values() if need.issubset(trial))
+                    completed = sum(1 for need in ship_need_boxes.values() if need.issubset(trial))
                     qty = box_qty_map[box]['total_qty']
-                    score = (completed, qty)
+                    # 점수: (완성되는 송장 수, 수량) — 사용자 요청: 수량 많은 걸로
+                    score = (qty, completed)
                     if score > best_score:
                         best_score = score
                         best = box
@@ -3601,10 +3593,9 @@ with tab8:
 
         rec_set = _recommend_box_set(int(capacity))
         if rec_set:
-            rec_set_sorted = sorted(rec_set)
-            ship_need_all = {s: set(stats['dapae_boxes']) for s, stats in ship_stats.items()}
+            rec_set_sorted = sorted(rec_set, key=_box_sort_key)
             completed_with_set = sum(
-                1 for need in ship_need_all.values() if need.issubset(set(rec_set))
+                1 for need in ship_need_boxes.values() if need.issubset(set(rec_set))
             )
             with sac0b:
                 st.success(
@@ -3748,27 +3739,27 @@ with tab8:
                         'message': '⚠️ 이 상품은 모두 분류 완료',
                         'detail': item_data['상품명'][:35]}
 
-            # 활성 박스 집합 필터: 선택된 박스들 중에서만 유효
+            # 활성 배대지 박스 집합 필터: 선택된 배대지 박스들의 상품만 유효
             _active_boxes_set = set(
                 str(b).strip().upper() for b in st.session_state.get('sort_active_boxes', [])
             )
             if _active_boxes_set:
                 box_candidates = []
                 for it in candidates:
-                    it_bn = str(it.get('box_num', '')).strip().upper()
-                    if it_bn and it_bn in _active_boxes_set:
+                    it_dp = str(it.get('dapae_box', '')).strip().upper()
+                    if it_dp and it_dp in _active_boxes_set:
                         box_candidates.append(it)
                 if not box_candidates:
-                    # 이 상품이 활성 박스들에 없음 → 다른 박스에 있음
+                    # 이 상품의 배대지 박스가 활성 목록에 없음
                     other_boxes = sorted(set(
-                        str(it.get('box_num', ''))
+                        str(it.get('dapae_box', ''))
                         for it in item_data['items']
-                        if it.get('box_num')
+                        if it.get('dapae_box')
                     ))
                     return {'status': 'wrong_box', 'barcode': bc,
                             '상품명': item_data['상품명'],
-                            'message': f'🚨 활성 박스에 없는 상품',
-                            'detail': f'이 상품은 {", ".join(other_boxes)}번 박스에 있음'}
+                            'message': f'🚨 활성 배대지 박스에 없는 상품',
+                            'detail': f'이 상품은 {", ".join(other_boxes)} 배대지 박스에 있음'}
                 candidates = box_candidates
 
             # 다량 모드: next_qty 만큼 차감 (여러 박스에 걸쳐 자동 분배)
