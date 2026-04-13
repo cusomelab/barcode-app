@@ -943,6 +943,31 @@ def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=
     except Exception:
         return False
 
+
+def pick_update_check_qty(client, sheet_url, tab_name, barcode, ship_num, scanned_qty):
+    """출고확인 시트의 해당 행 L열(확인 수량)에 스캔된 수량 기록.
+    매칭: F열(바코드) + I열(송장번호)
+    """
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return False
+        # F열(5) = 바코드, I열(8) = 송장번호, L열(11) = 확인 수량 → 12번째 열
+        for row_idx in range(1, len(all_values)):
+            row = all_values[row_idx]
+            row_bc = str(row[5]).strip() if len(row) > 5 else ''
+            row_ship = str(row[8]).strip() if len(row) > 8 else ''
+            if row_bc == barcode and (not ship_num or row_ship == ship_num):
+                ws.update_cell(row_idx + 1, 12, scanned_qty)
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -2893,7 +2918,7 @@ with tab8:
         if 'pick_url_출고' not in st.session_state and _qp.get('pu'):
             st.session_state['pick_url_출고'] = _qp.get('pu', '')
         if 'pick_tab_출고' not in st.session_state and _qp.get('pt'):
-            st.session_state['pick_tab_출고'] = _qp.get('pt', '쉽먼트시트')
+            st.session_state['pick_tab_출고'] = _qp.get('pt', '출고확인')
         if 'pick_url_배대지' not in st.session_state and _qp.get('bu'):
             st.session_state['pick_url_배대지'] = _qp.get('bu', '')
         if 'pick_tab_배대지' not in st.session_state and _qp.get('bt'):
@@ -2904,7 +2929,7 @@ with tab8:
         with gs_col1:
             url_출고 = st.text_input("구글 시트 URL", placeholder="https://docs.google.com/spreadsheets/d/...", key="pick_url_출고")
         with gs_col2:
-            tab_출고 = st.text_input("탭 이름", value="쉽먼트시트", key="pick_tab_출고")
+            tab_출고 = st.text_input("탭 이름", value="출고확인", key="pick_tab_출고")
 
         st.markdown("##### 배대지 입고 시트 (선택)")
         gs_col3, gs_col4 = st.columns([3, 1])
@@ -2968,7 +2993,7 @@ with tab8:
         st.markdown("""
 **구글 시트 모드:**
 1. 구글 시트 URL을 위 입력칸에 붙여넣기
-2. 탭 이름을 정확히 입력 (예: 쉽먼트시트, 배대지입고리스트)
+2. 탭 이름을 정확히 입력 (예: 출고확인, 배대지입고리스트)
 3. '구글 시트 연결' 클릭
 
 **CSV 모드:**
@@ -3823,8 +3848,32 @@ with tab8:
             }
 
         if sort_scanned:
-            st.session_state.sort_last_result = _process_sort_scan(sort_scanned)
+            scan_result = _process_sort_scan(sort_scanned)
+            st.session_state.sort_last_result = scan_result
             st.session_state.sort_scan_counter += 1
+
+            # 구글 시트 L열(확인 수량) 업데이트 (백그라운드)
+            if (scan_result.get('status') == 'ok'
+                    and st.session_state.get('pick_use_gsheet')
+                    and st.session_state.get('pick_gsheet_client')
+                    and st.session_state.get('pick_sheet_url_출고')
+                    and st.session_state.get('pick_sheet_tab_출고')):
+                import threading
+                _bc = scan_result.get('barcode', '')
+                _ship = scan_result.get('ship', '')
+                _qty = scan_result.get('processed_qty', 1)
+                def _bg_update_check():
+                    try:
+                        pick_update_check_qty(
+                            st.session_state.pick_gsheet_client,
+                            st.session_state.pick_sheet_url_출고,
+                            st.session_state.pick_sheet_tab_출고,
+                            _bc, _ship, _qty,
+                        )
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_update_check, daemon=True).start()
+
             st.rerun()
 
         # 자동 포커스 (multiselect/number input 상호작용 중에는 포커스 안 가로챔)
