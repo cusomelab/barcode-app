@@ -354,7 +354,19 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     # ── 상단 큰 박스번호 표시 ──
     # 호출 시 box_number 인자로 전달된 값을 사용 (자동 부여된 송장별 박스번호)
     # 송장 전체가 국내재고인 경우 box_number=None이 전달되어 표시되지 않음
-    big_box_label = f'{box_number}번' if box_number else ''
+    # 배대지 박스별 수량 요약도 함께 표시 (예: "58번 M2(10),W11(93)")
+    dapae_summary_str = ''
+    if box_number:
+        from collections import Counter as _Counter
+        dapae_counts = _Counter()  # {배대지박스키: 수량합}
+        for it in items:
+            bkey = _extract_box_key(it.get('boxNumber', ''))
+            if bkey:
+                dapae_counts[bkey] += it.get('quantity', 0)
+        if dapae_counts:
+            parts = [f'{k}({v})' for k, v in sorted(dapae_counts.items())]
+            dapae_summary_str = ' ' + ','.join(parts)
+    big_box_label = f'{box_number}번{dapae_summary_str}' if box_number else ''
 
     # ── 헤더: 좌측 타이틀 + 우측 쉽먼트(+바코드) ──────────
     # 박스번호는 좌측 상단에 이미 표시되므로 우측에는 쉽먼트 ID만
@@ -1990,7 +2002,7 @@ with tab5:
 # ── 쉽먼트 분석 헬퍼 함수들 ────────────────────────────
 
 def _extract_manifest_info(pdf_bytes):
-    """매니페스트 PDF 바이트에서 박스/송장 정보 추출"""
+    """매니페스트 PDF 바이트에서 박스/송장/쉽먼트번호 정보 추출"""
     pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
     pages_info = []
     for i, page in enumerate(pdf.pages):
@@ -1999,10 +2011,15 @@ def _extract_manifest_info(pdf_bytes):
         invoice_match = re.search(r'송장번호\s*\n?\s*(\d{12,})', text)
         if not invoice_match:
             invoice_match = re.search(r'(4\d{11})', text)
+        # 쉽먼트번호 (7~10자리, 보통 8자리)
+        shipment_id_match = re.search(r'쉽먼트\s*번호\s*\n?\s*(\d{7,10})', text)
+        if not shipment_id_match:
+            shipment_id_match = re.search(r'쉽먼트\s*(\d{7,10})', text)
         pages_info.append({
             'page_idx': i,
             'box_number': box_match.group(1) if box_match else None,
             'invoice_number': invoice_match.group(1) if invoice_match else None,
+            'shipment_id': shipment_id_match.group(1) if shipment_id_match else None,
             'is_main_page': box_match is not None
         })
     pdf.close()
@@ -2282,6 +2299,7 @@ with tab6:
                     invoice_mapping = {}
                     manifest_data = {}  # sid → (bytes, sorted_groups)
 
+                    inv_to_ship_id_map = {}  # 송장번호 → 쉽먼트번호
                     for sid, mf, lf in pairs:
                         m_bytes = mf.read()
                         mf.seek(0)
@@ -2293,6 +2311,8 @@ with tab6:
                         for g in sorted_m:
                             if g['invoice_number']:
                                 invoice_mapping[g['invoice_number']] = (sid, g['box_number'])
+                                if g.get('shipment_id'):
+                                    inv_to_ship_id_map[g['invoice_number']] = g['shipment_id']
 
                     # ===== 2. CSV → 출고지시서 PDF 생성 (송장번호별) =====
                     so_by_invoice = {}  # 송장번호 → PDF BytesIO
@@ -2328,11 +2348,11 @@ with tab6:
                             all_so_bufs = []
                             for inv_num in sorted(grouped.keys()):
                                 inv_items = grouped[inv_num]
-                                ship_id, _ = invoice_mapping.get(inv_num, (None, None))
+                                real_ship_id = inv_to_ship_id_map.get(inv_num, inv_num)
                                 auto_box_num = ship_to_box_num.get(inv_num)
                                 center = inv_items[0].get('logisticsCenter', '')
                                 gk = f"{center}_{inv_num}" if center else inv_num
-                                pdf_buf = create_work_order_pdf(gk, inv_items, ship_id, auto_box_num)
+                                pdf_buf = create_work_order_pdf(gk, inv_items, real_ship_id, auto_box_num)
                                 so_by_invoice[inv_num] = pdf_buf
                                 all_so_bufs.append(pdf_buf)
 
@@ -2639,10 +2659,14 @@ with tab7:
 
                     # ===== 3. 매칭 결과 확인 =====
                     all_manifest_invoices = set()
+                    # 송장번호 → 쉽먼트번호 매핑 (매니페스트에서 추출)
+                    invoice_to_shipment_id = {}  # {송장번호: 쉽먼트번호}
                     for _, sorted_m in rp_manifest_data:
                         for g in sorted_m:
                             if g['invoice_number']:
                                 all_manifest_invoices.add(g['invoice_number'])
+                                if g.get('shipment_id'):
+                                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
                     all_label_invoices = set()
                     for _, sorted_l in rp_label_data:
                         for g in sorted_l:
@@ -2688,7 +2712,8 @@ with tab7:
                         auto_box_num = rp_ship_to_box_num.get(inv_num)
                         center = inv_items[0].get('logisticsCenter', '')
                         gk = f"{center}_{inv_num}" if center else inv_num
-                        pdf_buf = create_work_order_pdf(gk, inv_items, inv_num, auto_box_num)
+                        real_shipment_id = invoice_to_shipment_id.get(inv_num, inv_num)
+                        pdf_buf = create_work_order_pdf(gk, inv_items, real_shipment_id, auto_box_num)
                         rp_so_by_invoice[inv_num] = pdf_buf
 
                     rp_progress.progress(0.6)
