@@ -354,7 +354,19 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     # ── 상단 큰 박스번호 표시 ──
     # 호출 시 box_number 인자로 전달된 값을 사용 (자동 부여된 송장별 박스번호)
     # 송장 전체가 국내재고인 경우 box_number=None이 전달되어 표시되지 않음
-    big_box_label = f'{box_number}번' if box_number else ''
+    # 배대지 박스별 수량 요약도 함께 표시 (예: "58번 M2(10),W11(93)")
+    dapae_summary_str = ''
+    if box_number:
+        from collections import Counter as _Counter
+        dapae_counts = _Counter()  # {배대지박스키: 수량합}
+        for it in items:
+            bkey = _extract_box_key(it.get('boxNumber', ''))
+            if bkey:
+                dapae_counts[bkey] += it.get('quantity', 0)
+        if dapae_counts:
+            parts = [f'{k}({v})' for k, v in sorted(dapae_counts.items())]
+            dapae_summary_str = ' ' + ','.join(parts)
+    big_box_label = f'{box_number}번{dapae_summary_str}' if box_number else ''
 
     # ── 헤더: 좌측 타이틀 + 우측 쉽먼트(+바코드) ──────────
     # 박스번호는 좌측 상단에 이미 표시되므로 우측에는 쉽먼트 ID만
