@@ -3770,6 +3770,20 @@ with tab8:
             # ── 활성 배대지 박스별 → 각 출고박스에 들어갈 내용물 리스트 ──
             st.markdown('#### 📋 출고박스에 담을 내용물 (배대지 박스 → 출고박스별)')
             active_set_upper = set(str(b).strip().upper() for b in active_boxes)
+
+            # 각 출고박스별 배대지 구성 (out_box → {dapae_box → needed_qty}) — 한 번만 계산
+            ob_composition = {}
+            for _bc_c, _v_c in sort_state.items():
+                for _it_c in _v_c['items']:
+                    _ob_c = str(_it_c.get('out_box', '')).strip()
+                    if not _ob_c.isdigit():
+                        continue
+                    _dp_c = str(_it_c.get('dapae_box', '')).strip().upper()
+                    if not _dp_c or _dp_c == 'NAN':
+                        continue
+                    ob_composition.setdefault(_ob_c, {})
+                    ob_composition[_ob_c][_dp_c] = ob_composition[_ob_c].get(_dp_c, 0) + _it_c['needed']
+
             for b in sorted(active_boxes, key=_box_sort_key):
                 info = box_qty_map[b]
                 size_lbl, size_emo = _box_size(info['total_qty'])
@@ -3862,9 +3876,16 @@ with tab8:
                         _s = sum(x['스캔'] for x in _items)
                         _ob_status = '✅' if _s >= _n and _n > 0 else ('🔄' if _s > 0 else '⬜')
                         _size_lbl2, _size_emo2 = box_size_lookup.get(_ob, ('', ''))
+                        # 같은 출고박스에 들어가는 다른 배대지 박스 구성 (현재 b 제외)
+                        _comp = ob_composition.get(_ob, {})
+                        _other_parts = [(k, v) for k, v in _comp.items() if k != b]
+                        _other_parts.sort(key=lambda x: _box_sort_key(x[0]))
+                        _other_str = ' '.join(f'{k}({v})' for k, v in _other_parts)
+                        _tail = f"  ·  🔀 **다른 박스**: {_other_str}" if _other_str else "  ·  (다른 박스 없음)"
                         st.markdown(
                             f"**{_ob_status} {_ob}번 출고박스** "
                             f"{_size_emo2}{_size_lbl2} — {_s}/{_n}개 ({len(_items)} SKU)"
+                            f"{_tail}"
                         )
                         st.dataframe(
                             _pd2.DataFrame(_items),
