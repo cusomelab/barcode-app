@@ -3900,12 +3900,18 @@ with tab8:
                         _s = sum(x['스캔'] for x in _items)
                         _ob_status = '✅' if _s >= _n and _n > 0 else ('🔄' if _s > 0 else '⬜')
                         _size_lbl2, _size_emo2 = box_size_lookup.get(_ob, ('', ''))
-                        # 같은 출고박스에 들어가는 다른 배대지 박스 구성 (현재 b 제외)
+                        # 이 출고박스에 들어가는 모든 배대지 박스 구성 (현재 b는 굵게 표시)
                         _comp = ob_composition.get(_ob, {})
-                        _other_parts = [(k, v) for k, v in _comp.items() if k != b]
-                        _other_parts.sort(key=lambda x: _box_sort_key(x[0]))
-                        _other_str = ' '.join(f'{k}({v})' for k, v in _other_parts)
-                        _tail = f"  ·  🔀 **다른 박스**: {_other_str}" if _other_str else "  ·  (다른 박스 없음)"
+                        _all_parts = sorted(_comp.items(), key=lambda x: _box_sort_key(x[0]))
+                        _total_qty = sum(v for _, v in _all_parts)
+                        if _all_parts:
+                            _parts_str = ', '.join(
+                                (f'**{k}({v})**' if k == b else f'{k}({v})')
+                                for k, v in _all_parts
+                            )
+                            _tail = f"  ·  📦 **구성 {_total_qty}개**: {_parts_str}"
+                        else:
+                            _tail = ''
                         st.markdown(
                             f"**{_ob_status} {_ob}번 출고박스** "
                             f"{_size_emo2}{_size_lbl2} — {_s}/{_n}개 ({len(_items)} SKU)"
