@@ -3581,14 +3581,29 @@ with tab8:
                     continue
                 ship_need_boxes.setdefault(ship, set()).add(dp)
 
+        # ── 배대지 박스별 완료 상태 계산 (sort_state 기준) ──
+        # box_done: dapae_box → True(모두 스캔됨) / False
+        box_done = {}
+        box_progress = {}  # dapae_box → (scanned, needed)
+        for _bc_bd, _v_bd in sort_state.items():
+            for _it_bd in _v_bd['items']:
+                _dp_bd = str(_it_bd.get('dapae_box', '')).strip().upper()
+                if not _dp_bd or _dp_bd == 'NAN':
+                    continue
+                s, n = box_progress.get(_dp_bd, (0, 0))
+                box_progress[_dp_bd] = (s + _it_bd['scanned'], n + _it_bd['needed'])
+        for _dp_bd, (s, n) in box_progress.items():
+            box_done[_dp_bd] = (n > 0 and s >= n)
+
         # ── 시작 박스 지정 ──
         st.markdown('### 🎯 작업할 배대지 박스')
 
-        # 1순위 추천: 수량이 가장 많은 배대지 박스부터 (빨리 비우고 공간 확보)
+        # 1순위 추천: 미완료 박스 중 수량이 가장 많은 배대지 박스
         top_box = None
-        if box_qty_map:
-            top_box_key = max(box_qty_map.keys(), key=lambda k: box_qty_map[k]['total_qty'])
-            top_info = box_qty_map[top_box_key]
+        _incomplete_boxes = {k: v for k, v in box_qty_map.items() if not box_done.get(k, False)}
+        if _incomplete_boxes:
+            top_box_key = max(_incomplete_boxes.keys(), key=lambda k: _incomplete_boxes[k]['total_qty'])
+            top_info = _incomplete_boxes[top_box_key]
             top_out_boxes = sorted(top_info['out_boxes'], key=_box_sort_key)
             out_box_str = ', '.join(f'{b}번' for b in top_out_boxes)
             st.success(
@@ -3597,19 +3612,27 @@ with tab8:
                 f'📦 **준비할 출고박스 ({len(top_out_boxes)}개)**: {out_box_str}'
             )
             top_box = top_box_key
+        elif box_qty_map:
+            st.success('🎉 **모든 배대지 박스 완료!**')
 
-        # 드롭다운 정렬: 수량 많은 배대지 박스 내림차순
-        recommended_boxes = sorted(
-            box_qty_map.items(),
-            key=lambda x: (-x[1]['total_qty'], _box_sort_key(x[0]))
-        )
+        # 드롭다운 정렬: 미완료 우선(수량 많은 순) → 완료는 맨 아래(알파벳+번호 순)
+        def _dropdown_sort_key(item):
+            k, v = item
+            done = box_done.get(k, False)
+            # (완료 여부, -수량, box_sort_key) — 미완료(False=0)가 완료(True=1)보다 앞
+            return (1 if done else 0, -v['total_qty'], _box_sort_key(k))
+
+        recommended_boxes = sorted(box_qty_map.items(), key=_dropdown_sort_key)
         all_box_nums_sorted = [k for k, _ in recommended_boxes]
 
         def _fmt_box_num(x):
             info = box_qty_map[x]
             size_lbl, size_emo = _box_size(info['total_qty'])
             ship_cnt = len(info['ships'])
-            return f"{x}번 ({info['total_qty']}개 / {size_emo}{size_lbl} / 송장 {ship_cnt}개)"
+            done = box_done.get(x, False)
+            prefix = '✅ ' if done else ''
+            suffix = ' — 완료' if done else ''
+            return f"{prefix}{x}번 ({info['total_qty']}개 / {size_emo}{size_lbl} / 송장 {ship_cnt}개){suffix}"
 
         # 창고 수용력 + 자동 추천 박스 세트
         sac0a, sac0b = st.columns([1, 3])
@@ -3621,11 +3644,12 @@ with tab8:
                 help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수',
             )
 
-        # 집합 커버 추천: 수량 많은 배대지 박스부터 + 송장 완성 많이 되는 것 우선
+        # 집합 커버 추천: 미완료 박스 중 수량 많은 배대지 박스부터 + 송장 완성 많이 되는 것 우선
         def _recommend_box_set(target_count, already_committed=None):
             committed = set(already_committed or [])
             picks = []
-            available = set(box_qty_map.keys()) - committed
+            # 완료된 박스는 추천 대상에서 제외
+            available = set(k for k in box_qty_map.keys() if not box_done.get(k, False)) - committed
             while len(picks) < target_count and available:
                 best = None
                 best_score = (-1, -1)
