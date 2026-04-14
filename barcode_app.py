@@ -3677,8 +3677,29 @@ with tab8:
         if 'sort_qty_input_mode' not in st.session_state:
             st.session_state.sort_qty_input_mode = False
 
-        # 수량 표시 + 입력
-        qcol1, qcol2, qcol3 = st.columns([1, 2, 2])
+        # 수량 입력 모드: 큰 알림 + 전체 너비 입력창
+        if st.session_state.sort_qty_input_mode:
+            st.warning('🔢 **수량을 입력하세요** — 숫자 입력 후 Enter')
+            qty_text_key = f'sort_qty_text_{st.session_state.sort_scan_counter}'
+            qty_text = st.text_input(
+                '다량 수량',
+                key=qty_text_key,
+                placeholder='숫자 입력 후 Enter (예: 50)',
+                label_visibility='collapsed',
+            )
+            if qty_text:
+                try:
+                    qty_val = int(qty_text.strip())
+                    if qty_val >= 1:
+                        st.session_state.sort_next_qty = qty_val
+                        st.session_state.sort_qty_input_mode = False
+                        st.session_state.sort_scan_counter += 1
+                        st.rerun()
+                except ValueError:
+                    st.error('숫자만 입력 가능합니다')
+
+        # 수량 표시 + 1개 모드 리셋 버튼
+        qcol1, qcol2 = st.columns([1, 1])
         with qcol1:
             if st.session_state.sort_next_qty > 1:
                 st.markdown(
@@ -3691,21 +3712,8 @@ with tab8:
                     '1개 모드'
                     '</div>', unsafe_allow_html=True)
         with qcol2:
-            # 수량 입력 모드일 때만 입력창 표시
-            if st.session_state.sort_qty_input_mode:
-                qty_input = st.number_input(
-                    '수량 입력 후 상품 스캔',
-                    min_value=1, max_value=9999, value=1,
-                    key=f'sort_qty_input_{st.session_state.sort_scan_counter}',
-                )
-                st.session_state.sort_next_qty = int(qty_input)
-        with qcol3:
-            if st.session_state.sort_qty_input_mode:
-                if st.button('✅ 수량 확정', key='sort_qty_confirm', use_container_width=True, type='primary'):
-                    st.session_state.sort_qty_input_mode = False
-                    st.rerun()
             if st.session_state.sort_next_qty > 1 and not st.session_state.sort_qty_input_mode:
-                if st.button('🔄 1개 모드로', key='sort_qty_reset', use_container_width=True):
+                if st.button('🔄 1개 모드로 복귀', key='sort_qty_reset', use_container_width=True):
                     st.session_state.sort_next_qty = 1
                     st.rerun()
 
@@ -3888,6 +3896,13 @@ with tab8:
                 }
                 return null;
             }
+            function findQtyInput(){
+                const inputs = doc.querySelectorAll('input[type="text"]');
+                for (const inp of inputs){
+                    if (inp.placeholder && inp.placeholder.includes('숫자 입력')) return inp;
+                }
+                return null;
+            }
             function isInteractingOther(){
                 const active = doc.activeElement;
                 if (!active) return false;
@@ -3905,6 +3920,12 @@ with tab8:
                 return false;
             }
             function focusScan(){
+                // 수량 입력창이 표시되어 있으면 우선 그 창으로 포커스
+                const qty = findQtyInput();
+                if (qty) {
+                    if (doc.activeElement !== qty) qty.focus();
+                    return;
+                }
                 const inp = findScan();
                 if (!inp) return;
                 if (doc.activeElement === inp) return;
