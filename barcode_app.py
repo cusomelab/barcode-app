@@ -676,17 +676,21 @@ def create_box_labels_pdf(box_entries):
     from reportlab.lib.pagesizes import A4 as _A4
     from reportlab.lib.units import mm as _mm
 
-    # 폼텍 3100 사양
+    # 폼텍 3100 사양 (38.1 × 21.2mm, 5×13 = 65칸)
     LABEL_W = 38.1 * _mm
     LABEL_H = 21.2 * _mm
+    X_GAP = 2.54 * _mm      # 라벨 사이 가로 간격 (폼텍 3100 표준)
+    Y_GAP = 0 * _mm         # 세로 간격 없음 (라벨이 붙어있음)
     COLS = 5
     ROWS = 13
     PER_PAGE = COLS * ROWS  # 65
     # A4: 210 x 297mm
-    # 좌우 여백 계산: (210 - 5*38.1) / 2 = (210 - 190.5)/2 = 9.75mm
-    # 상하 여백 계산: (297 - 13*21.2) / 2 = (297 - 275.6)/2 = 10.7mm
-    LEFT_MARGIN = (210 * _mm - COLS * LABEL_W) / 2
-    TOP_MARGIN = (297 * _mm - ROWS * LABEL_H) / 2
+    # 좌우 여백: (210 - (5*38.1 + 4*2.54)) / 2 = (210 - 200.66) / 2 = 4.67mm
+    # 상하 여백: (297 - 13*21.2) / 2 = 10.7mm
+    total_w = COLS * LABEL_W + (COLS - 1) * X_GAP
+    total_h = ROWS * LABEL_H + (ROWS - 1) * Y_GAP
+    LEFT_MARGIN = (210 * _mm - total_w) / 2
+    TOP_MARGIN = (297 * _mm - total_h) / 2
 
     from reportlab.lib.utils import ImageReader as _ImageReader
 
@@ -702,9 +706,9 @@ def create_box_labels_pdf(box_entries):
 
         col = slot_idx % COLS
         row = slot_idx // COLS
-        x = LEFT_MARGIN + col * LABEL_W
+        x = LEFT_MARGIN + col * (LABEL_W + X_GAP)
         # 좌표 변환: PDF는 좌하단 원점, 라벨은 좌상단부터 채움
-        y_top = page_h - TOP_MARGIN - row * LABEL_H
+        y_top = page_h - TOP_MARGIN - row * (LABEL_H + Y_GAP)
         y = y_top - LABEL_H
 
         # 라벨 내용 파싱
