@@ -3894,6 +3894,50 @@ with tab8:
                                 st.success(f'✅ {b} 배대지박스 완료 처리 (세션만, 시트 미연결)')
                             st.rerun()
 
+                    # ── 🎯 상품 단위 리스트 (수량 많은 순) — 제일 많은 것부터 준비 ──
+                    sku_rows = []
+                    for _bc_s, _v_s in sort_state.items():
+                        total_in_box = 0
+                        total_scanned_in_box = 0
+                        out_box_break = {}  # out_box → qty
+                        for _it_s in _v_s['items']:
+                            _dp_s = str(_it_s.get('dapae_box', '')).strip().upper()
+                            if _dp_s != b:
+                                continue
+                            total_in_box += _it_s['needed']
+                            total_scanned_in_box += _it_s['scanned']
+                            _ob_s = str(_it_s.get('out_box', '')).strip()
+                            if _ob_s:
+                                out_box_break[_ob_s] = out_box_break.get(_ob_s, 0) + _it_s['needed']
+                        if total_in_box <= 0:
+                            continue
+                        # 출고박스 브레이크다운 (박스 번호 순)
+                        ob_parts = sorted(out_box_break.items(), key=lambda x: _box_sort_key(x[0]))
+                        ob_str = ', '.join(f'{k}번({v})' for k, v in ob_parts)
+                        _sku_status = '✅' if total_scanned_in_box >= total_in_box else (
+                            '🔄' if total_scanned_in_box > 0 else '⬜'
+                        )
+                        sku_rows.append({
+                            '상태': _sku_status,
+                            '이 박스 수량': total_in_box,
+                            '스캔': total_scanned_in_box,
+                            '남음': max(0, total_in_box - total_scanned_in_box),
+                            '바코드': _bc_s,
+                            '상품명': _v_s['상품명'],
+                            '출고박스 배분': ob_str,
+                        })
+                    # 수량 많은 순 정렬 (수량 동률이면 남은 수량 많은 순)
+                    sku_rows.sort(key=lambda r: (-r['이 박스 수량'], -r['남음']))
+                    if sku_rows:
+                        st.markdown('##### 🎯 이 박스 상품 (수량 많은 순) — 제일 많이 담긴 것부터 준비')
+                        st.dataframe(
+                            _pd2.DataFrame(sku_rows),
+                            use_container_width=True, hide_index=True,
+                            height=min(500, len(sku_rows) * 38 + 40),
+                        )
+
+                    st.markdown('---')
+                    st.markdown('##### 📦 출고박스별 상세 (출고박스마다 담을 상품)')
                     for _ob in sorted(ob_items.keys(), key=_box_sort_key):
                         _items = ob_items[_ob]
                         _n = sum(x['필요'] for x in _items)
