@@ -706,9 +706,14 @@ def create_box_labels_pdf(box_entries):
 
         col = slot_idx % COLS
         row = slot_idx // COLS
-        x = LEFT_MARGIN + col * (LABEL_W + X_GAP)
+        # 프린터 오프셋 보정:
+        # - 첫 2행만 왼쪽으로 10% 이동
+        # - 전체 위로 10% 이동
+        x_offset = -LABEL_W * 0.1 if row < 2 else 0
+        y_offset = LABEL_H * 0.1  # PDF는 위로 갈수록 y 증가
+        x = LEFT_MARGIN + col * (LABEL_W + X_GAP) + x_offset
         # 좌표 변환: PDF는 좌하단 원점, 라벨은 좌상단부터 채움
-        y_top = page_h - TOP_MARGIN - row * (LABEL_H + Y_GAP)
+        y_top = page_h - TOP_MARGIN - row * (LABEL_H + Y_GAP) + y_offset
         y = y_top - LABEL_H
 
         # 라벨 내용 파싱
