@@ -1010,6 +1010,20 @@ def pick_clean_출고(df):
     df["수량"] = _pd.to_numeric(df["수량"], errors="coerce").fillna(0).astype(int)
     df["쉽먼트운송장번호"] = df["쉽먼트운송장번호"].astype(str).str.replace(r"\.0$", "", regex=True)
     df["바코드"] = df["바코드"].astype(str).str.strip()
+    # 확인 수량(L열) 보존 - 시트 재로드 시 진행 상태 복원용
+    check_col = None
+    for c in df.columns:
+        c_norm = str(c).strip().replace(' ', '')
+        if c_norm in ('확인수량', '확인량'):
+            check_col = c
+            break
+    if check_col is not None:
+        df["확인수량"] = _pd.to_numeric(df[check_col], errors="coerce").fillna(0).astype(int)
+    elif len(df.columns) >= 12:
+        # 헤더가 비어있거나 다른 이름이면 L열(12번째) 위치로 시도
+        df["확인수량"] = _pd.to_numeric(df.iloc[:, 11], errors="coerce").fillna(0).astype(int)
+    else:
+        df["확인수량"] = 0
     if "박스번호" in df.columns:
         parsed = df["박스번호"].apply(pick_parse_box)
         df["회차기호"] = parsed.apply(lambda x: x["기호"])
@@ -2922,12 +2936,14 @@ with tab8:
     )
 
     if pick_mode == "📊 구글 시트 (실시간)":
+        # 기본 출고확인 고정 시트 (운영용)
+        _DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=224790693#gid=224790693"
         # 페이지 새로고침 시에도 유지되도록 query_params에서 복원
         _qp = st.query_params
-        if 'pick_url_출고' not in st.session_state and _qp.get('pu'):
-            st.session_state['pick_url_출고'] = _qp.get('pu', '')
-        if 'pick_tab_출고' not in st.session_state and _qp.get('pt'):
-            st.session_state['pick_tab_출고'] = _qp.get('pt', '출고확인')
+        if 'pick_url_출고' not in st.session_state:
+            st.session_state['pick_url_출고'] = _qp.get('pu') or _DEFAULT_SHEET_URL
+        if 'pick_tab_출고' not in st.session_state:
+            st.session_state['pick_tab_출고'] = _qp.get('pt') or '출고확인'
         if 'pick_url_배대지' not in st.session_state and _qp.get('bu'):
             st.session_state['pick_url_배대지'] = _qp.get('bu', '')
         if 'pick_tab_배대지' not in st.session_state and _qp.get('bt'):
@@ -3373,6 +3389,12 @@ with tab8:
                 dapae_raw = str(row.get('박스넘버') or '').strip().upper()
                 if not dapae_raw or dapae_raw == 'NAN':
                     dapae_raw = ''
+                # 시트 L열(확인수량)에서 이전 진행 상태 복원
+                try:
+                    prev_scanned = int(row.get('확인수량', 0) or 0)
+                except (ValueError, TypeError):
+                    prev_scanned = 0
+                prev_scanned = max(0, min(prev_scanned, qty))
                 if bc not in state:
                     state[bc] = {'상품명': name, 'items': []}
                 state[bc]['items'].append({
@@ -3383,7 +3405,7 @@ with tab8:
                     'sym': '',
                     'ship': ship,
                     'needed': qty,
-                    'scanned': 0,
+                    'scanned': prev_scanned,      # L열에서 복원한 값
                 })
             return state
 
@@ -3677,6 +3699,179 @@ with tab8:
             header = f'📦 **활성 배대지 박스 {len(active_boxes)}개 — 준비할 출고박스 총 {total_out_count}개**'
             st.info(header + '\n\n' + '\n\n'.join(active_info_lines))
 
+            # ── 활성 박스별 빠른 완료 처리 버튼 (expander 밖으로 노출) ──
+            def _mark_box_done_bulk(target_box):
+                """배대지 박스 안의 모든 항목을 완료 처리 + 시트 L열 일괄 업데이트"""
+                updates_for_sheet = []
+                for _bc2, _v2 in sort_state.items():
+                    for _it2 in _v2['items']:
+                        if str(_it2.get('dapae_box', '')).strip().upper() == target_box:
+                            _it2['scanned'] = _it2['needed']
+                for _bc2, _v2 in sort_state.items():
+                    _ship_cum = {}
+                    touched_in_box = False
+                    for _it2 in _v2['items']:
+                        _dp2 = str(_it2.get('dapae_box', '')).strip().upper()
+                        _ship2 = _it2.get('ship', '')
+                        if _dp2 == target_box:
+                            touched_in_box = True
+                        if _ship2:
+                            _ship_cum[_ship2] = _ship_cum.get(_ship2, 0) + _it2['scanned']
+                    if touched_in_box:
+                        for _s2, _c2 in _ship_cum.items():
+                            updates_for_sheet.append((_bc2, _s2, _c2))
+                if (st.session_state.get('pick_use_gsheet')
+                        and st.session_state.get('pick_gsheet_client')
+                        and st.session_state.get('pick_sheet_url_출고')
+                        and st.session_state.get('pick_sheet_tab_출고')
+                        and updates_for_sheet):
+                    import threading
+                    _client = st.session_state.pick_gsheet_client
+                    _url = st.session_state.pick_sheet_url_출고
+                    _tab = st.session_state.pick_sheet_tab_출고
+                    def _bg_bulk():
+                        for _ub, _us, _uq in updates_for_sheet:
+                            try:
+                                pick_update_check_qty(_client, _url, _tab, _ub, _us, _uq)
+                            except Exception:
+                                pass
+                    threading.Thread(target=_bg_bulk, daemon=True).start()
+                    return True, len(updates_for_sheet)
+                return False, 0
+
+            st.markdown('##### ✅ 박스 완료 처리 (이미 끝낸 배대지 박스)')
+            _done_cols = st.columns(min(4, len(active_boxes)) or 1)
+            for _i, _b in enumerate(sorted(active_boxes, key=_box_sort_key)):
+                _info = box_qty_map[_b]
+                _cur_s = 0
+                _cur_n = 0
+                for _bc_x, _v_x in sort_state.items():
+                    for _it_x in _v_x['items']:
+                        if str(_it_x.get('dapae_box', '')).strip().upper() == _b:
+                            _cur_s += _it_x['scanned']
+                            _cur_n += _it_x['needed']
+                _is_done = _cur_s >= _cur_n and _cur_n > 0
+                _label = f'✅ {_b} 완료 처리' if not _is_done else f'✔ {_b} 이미 완료'
+                with _done_cols[_i % len(_done_cols)]:
+                    if st.button(
+                        _label,
+                        key=f'sort_quick_done_{_b}',
+                        use_container_width=True,
+                        type='primary' if not _is_done else 'secondary',
+                        disabled=_is_done,
+                    ):
+                        ok, n = _mark_box_done_bulk(_b)
+                        if ok:
+                            st.success(f'✅ {_b} 완료 처리 — 시트 L열 업데이트 중 ({n}건)')
+                        else:
+                            st.success(f'✅ {_b} 완료 처리 (세션만, 시트 미연결)')
+                        st.rerun()
+
+            # ── 활성 배대지 박스별 → 각 출고박스에 들어갈 내용물 리스트 ──
+            st.markdown('#### 📋 출고박스에 담을 내용물 (배대지 박스 → 출고박스별)')
+            active_set_upper = set(str(b).strip().upper() for b in active_boxes)
+            for b in sorted(active_boxes, key=_box_sort_key):
+                info = box_qty_map[b]
+                size_lbl, size_emo = _box_size(info['total_qty'])
+                # 이 배대지 박스에서 나가는 출고박스별 항목 집계
+                ob_items = {}  # out_box → list of {바코드, 상품명, 필요, 스캔, 남음}
+                for _bc, _v in sort_state.items():
+                    for _it in _v['items']:
+                        _dp = str(_it.get('dapae_box', '')).strip().upper()
+                        if _dp != b:
+                            continue
+                        _ob = str(_it.get('out_box', '')).strip()
+                        if not _ob.isdigit():
+                            continue
+                        ob_items.setdefault(_ob, []).append({
+                            '바코드': _bc,
+                            '상품명': _v['상품명'][:35],
+                            '필요': _it['needed'],
+                            '스캔': _it['scanned'],
+                            '남음': max(0, _it['needed'] - _it['scanned']),
+                        })
+                # 합계 표시
+                total_ob_n = sum(it['필요'] for items in ob_items.values() for it in items)
+                total_ob_s = sum(it['스캔'] for items in ob_items.values() for it in items)
+                head_pct = (total_ob_s / total_ob_n * 100) if total_ob_n else 0
+                head_status = '✅' if total_ob_s >= total_ob_n and total_ob_n > 0 else ('🔄' if total_ob_s > 0 else '⬜')
+                exp_label = (
+                    f'{head_status} {b} 배대지박스 ({size_emo}{size_lbl}, {total_ob_s}/{total_ob_n}개, '
+                    f'{head_pct:.0f}%) → 출고박스 {len(ob_items)}개'
+                )
+                with st.expander(exp_label, expanded=False):
+                    # ── 박스 일괄 완료 처리 (이미 물리적으로 끝난 박스용) ──
+                    btn_col1, btn_col2 = st.columns([2, 1])
+                    with btn_col1:
+                        st.caption('💡 이 배대지 박스가 이미 물리적으로 완료된 경우 → 우측 버튼으로 시트 L열 일괄 채움')
+                    with btn_col2:
+                        if st.button(
+                            f'✅ {b} 박스 완료 처리',
+                            key=f'sort_box_done_{b}',
+                            use_container_width=True,
+                            type='primary' if total_ob_s < total_ob_n else 'secondary',
+                        ):
+                            # 1) session_state 즉시 채움
+                            updates_for_sheet = []  # [(bc, ship, cum_scanned), ...]
+                            ship_cum_per_bc = {}    # bc → {ship: cum}
+                            for _bc2, _v2 in sort_state.items():
+                                for _it2 in _v2['items']:
+                                    _dp2 = str(_it2.get('dapae_box', '')).strip().upper()
+                                    if _dp2 != b:
+                                        continue
+                                    _it2['scanned'] = _it2['needed']
+                            # 2) 송장별 누적 스캔수량 계산 (L열 덮어쓰기용)
+                            for _bc2, _v2 in sort_state.items():
+                                _ship_cum = {}
+                                touched_in_box = False
+                                for _it2 in _v2['items']:
+                                    _dp2 = str(_it2.get('dapae_box', '')).strip().upper()
+                                    _ship2 = _it2.get('ship', '')
+                                    if _dp2 == b:
+                                        touched_in_box = True
+                                    if _ship2:
+                                        _ship_cum[_ship2] = _ship_cum.get(_ship2, 0) + _it2['scanned']
+                                if touched_in_box:
+                                    for _s2, _c2 in _ship_cum.items():
+                                        updates_for_sheet.append((_bc2, _s2, _c2))
+                            # 3) 시트 L열 백그라운드 일괄 업데이트
+                            if (st.session_state.get('pick_use_gsheet')
+                                    and st.session_state.get('pick_gsheet_client')
+                                    and st.session_state.get('pick_sheet_url_출고')
+                                    and st.session_state.get('pick_sheet_tab_출고')
+                                    and updates_for_sheet):
+                                import threading
+                                _client = st.session_state.pick_gsheet_client
+                                _url = st.session_state.pick_sheet_url_출고
+                                _tab = st.session_state.pick_sheet_tab_출고
+                                def _bg_bulk():
+                                    for _ub, _us, _uq in updates_for_sheet:
+                                        try:
+                                            pick_update_check_qty(_client, _url, _tab, _ub, _us, _uq)
+                                        except Exception:
+                                            pass
+                                threading.Thread(target=_bg_bulk, daemon=True).start()
+                                st.success(f'✅ {b} 배대지박스 완료 처리 — 시트 L열 업데이트 중 ({len(updates_for_sheet)}건)')
+                            else:
+                                st.success(f'✅ {b} 배대지박스 완료 처리 (세션만, 시트 미연결)')
+                            st.rerun()
+
+                    for _ob in sorted(ob_items.keys(), key=_box_sort_key):
+                        _items = ob_items[_ob]
+                        _n = sum(x['필요'] for x in _items)
+                        _s = sum(x['스캔'] for x in _items)
+                        _ob_status = '✅' if _s >= _n and _n > 0 else ('🔄' if _s > 0 else '⬜')
+                        _size_lbl2, _size_emo2 = box_size_lookup.get(_ob, ('', ''))
+                        st.markdown(
+                            f"**{_ob_status} {_ob}번 출고박스** "
+                            f"{_size_emo2}{_size_lbl2} — {_s}/{_n}개 ({len(_items)} SKU)"
+                        )
+                        st.dataframe(
+                            _pd2.DataFrame(_items),
+                            use_container_width=True, hide_index=True,
+                            height=min(250, len(_items) * 38 + 40),
+                        )
+
         st.markdown('---')
 
         # ── 바코드 스캔 ──
@@ -3815,6 +4010,7 @@ with tab8:
             requested_qty = max(1, requested_qty)
             processed = 0
             last_target = candidates[0]
+            touched_ships = set()  # 이번 스캔으로 영향받은 송장(시트 L열 업데이트용)
             # 후보들을 순회하며 각 박스 채워가기
             remaining_to_scan = requested_qty
             idx = 0
@@ -3829,8 +4025,21 @@ with tab8:
                 processed += take
                 remaining_to_scan -= take
                 last_target = it
+                if it.get('ship'):
+                    touched_ships.add(it['ship'])
                 if it['scanned'] >= it['needed']:
                     idx += 1
+
+            # 영향받은 송장별 누적 스캔수량 (L열 덮어쓰기용)
+            touched_updates = []
+            if touched_ships:
+                ship_cum = {}
+                for _it in item_data['items']:
+                    _s = _it.get('ship')
+                    if _s in touched_ships:
+                        ship_cum[_s] = ship_cum.get(_s, 0) + _it['scanned']
+                for _s, _c in ship_cum.items():
+                    touched_updates.append((bc, _s, _c))
 
             # 모두 차감 후 남은 수량 (수량 초과)
             over_qty = requested_qty - processed
@@ -3862,6 +4071,7 @@ with tab8:
                 'box_complete': box_complete,
                 'processed_qty': processed,
                 'over_qty': over_qty,
+                'touched_updates': touched_updates,  # [(bc, ship, cum_scanned), ...]
             }
 
         if sort_scanned:
@@ -3870,25 +4080,30 @@ with tab8:
             st.session_state.sort_scan_counter += 1
 
             # 구글 시트 L열(확인 수량) 업데이트 (백그라운드)
+            # touched_updates: 이번 스캔으로 영향받은 (bc, ship, 누적스캔수량) 목록
+            # 누적값으로 덮어쓰므로 시트를 다시 로드해도 진행 상태가 보존됨
             if (scan_result.get('status') == 'ok'
                     and st.session_state.get('pick_use_gsheet')
                     and st.session_state.get('pick_gsheet_client')
                     and st.session_state.get('pick_sheet_url_출고')
                     and st.session_state.get('pick_sheet_tab_출고')):
                 import threading
-                _bc = scan_result.get('barcode', '')
-                _ship = scan_result.get('ship', '')
-                _qty = scan_result.get('processed_qty', 1)
+                _updates = scan_result.get('touched_updates') or []
+                if not _updates:
+                    # fallback: 단일 스캔 시 last_target 정보로
+                    _bc = scan_result.get('barcode', '')
+                    _ship = scan_result.get('ship', '')
+                    _qty = scan_result.get('processed_qty', 1)
+                    _updates = [(_bc, _ship, _qty)]
+                _client = st.session_state.pick_gsheet_client
+                _url = st.session_state.pick_sheet_url_출고
+                _tab = st.session_state.pick_sheet_tab_출고
                 def _bg_update_check():
-                    try:
-                        pick_update_check_qty(
-                            st.session_state.pick_gsheet_client,
-                            st.session_state.pick_sheet_url_출고,
-                            st.session_state.pick_sheet_tab_출고,
-                            _bc, _ship, _qty,
-                        )
-                    except Exception:
-                        pass
+                    for _ub, _us, _uq in _updates:
+                        try:
+                            pick_update_check_qty(_client, _url, _tab, _ub, _us, _uq)
+                        except Exception:
+                            pass
                 threading.Thread(target=_bg_update_check, daemon=True).start()
 
             st.rerun()
