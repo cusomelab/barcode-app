@@ -3770,6 +3770,20 @@ with tab8:
             # ── 활성 배대지 박스별 → 각 출고박스에 들어갈 내용물 리스트 ──
             st.markdown('#### 📋 출고박스에 담을 내용물 (배대지 박스 → 출고박스별)')
             active_set_upper = set(str(b).strip().upper() for b in active_boxes)
+
+            # 각 출고박스별 배대지 구성 (out_box → {dapae_box → needed_qty}) — 한 번만 계산
+            ob_composition = {}
+            for _bc_c, _v_c in sort_state.items():
+                for _it_c in _v_c['items']:
+                    _ob_c = str(_it_c.get('out_box', '')).strip()
+                    if not _ob_c.isdigit():
+                        continue
+                    _dp_c = str(_it_c.get('dapae_box', '')).strip().upper()
+                    if not _dp_c or _dp_c == 'NAN':
+                        continue
+                    ob_composition.setdefault(_ob_c, {})
+                    ob_composition[_ob_c][_dp_c] = ob_composition[_ob_c].get(_dp_c, 0) + _it_c['needed']
+
             for b in sorted(active_boxes, key=_box_sort_key):
                 info = box_qty_map[b]
                 size_lbl, size_emo = _box_size(info['total_qty'])
@@ -3862,9 +3876,16 @@ with tab8:
                         _s = sum(x['스캔'] for x in _items)
                         _ob_status = '✅' if _s >= _n and _n > 0 else ('🔄' if _s > 0 else '⬜')
                         _size_lbl2, _size_emo2 = box_size_lookup.get(_ob, ('', ''))
+                        # 같은 출고박스에 들어가는 다른 배대지 박스 구성 (현재 b 제외)
+                        _comp = ob_composition.get(_ob, {})
+                        _other_parts = [(k, v) for k, v in _comp.items() if k != b]
+                        _other_parts.sort(key=lambda x: _box_sort_key(x[0]))
+                        _other_str = ' '.join(f'{k}({v})' for k, v in _other_parts)
+                        _tail = f"  ·  🔀 **다른 박스**: {_other_str}" if _other_str else "  ·  (다른 박스 없음)"
                         st.markdown(
                             f"**{_ob_status} {_ob}번 출고박스** "
                             f"{_size_emo2}{_size_lbl2} — {_s}/{_n}개 ({len(_items)} SKU)"
+                            f"{_tail}"
                         )
                         st.dataframe(
                             _pd2.DataFrame(_items),
@@ -4315,6 +4336,7 @@ with tab8:
                     ent['sku_done'] += 1
 
         prog_rows = []
+        box_keys_ordered = []  # 선택 이벤트에서 인덱스 → box_key 매핑
         for key, ent in sorted(box_summary.items(), key=lambda x: (x[1]['sym'], _box_sort_key(x[1]['box_num']))):
             pct = (ent['scanned'] / ent['needed'] * 100) if ent['needed'] else 0
             if ent['scanned'] >= ent['needed'] and ent['needed'] > 0:
@@ -4333,8 +4355,66 @@ with tab8:
                 'SKU완료': f'{ent["sku_done"]}/{ent["sku_total"]}',
                 '수량': f'{ent["scanned"]}/{ent["needed"]}',
             })
-        st.dataframe(_pd2.DataFrame(prog_rows), use_container_width=True, hide_index=True,
-                     height=min(500, len(prog_rows) * 38 + 40))
+            box_keys_ordered.append(key)
+
+        st.caption('💡 박스 행을 클릭하면 해당 박스의 상품 내역이 아래에 표시됩니다')
+        try:
+            prog_event = st.dataframe(
+                _pd2.DataFrame(prog_rows),
+                use_container_width=True, hide_index=True,
+                height=min(500, len(prog_rows) * 38 + 40),
+                on_select='rerun',
+                selection_mode='single-row',
+                key='sort_box_prog_table',
+            )
+            _selected_rows = getattr(getattr(prog_event, 'selection', None), 'rows', []) or []
+        except TypeError:
+            # 구버전 Streamlit fallback
+            st.dataframe(_pd2.DataFrame(prog_rows), use_container_width=True, hide_index=True,
+                         height=min(500, len(prog_rows) * 38 + 40))
+            _selected_rows = []
+
+        # 선택된 박스의 상품 상세
+        if _selected_rows and box_keys_ordered:
+            _sel_idx = _selected_rows[0]
+            if 0 <= _sel_idx < len(box_keys_ordered):
+                _sel_key = box_keys_ordered[_sel_idx]
+                _sel_ent = box_summary[_sel_key]
+                _sel_bn_key = str(_sel_ent['box_num']).strip().upper()
+                _sel_size_lbl, _sel_size_emo = box_size_lookup.get(_sel_bn_key, ('', ''))
+                detail_rows = []
+                for _bc_d, _v_d in sort_state.items():
+                    for _it_d in _v_d['items']:
+                        if _it_d['box_key'] != _sel_key:
+                            continue
+                        _d_s = _it_d['scanned']
+                        _d_n = _it_d['needed']
+                        _d_status = '✅' if _d_s >= _d_n and _d_n > 0 else ('🔄' if _d_s > 0 else '⬜')
+                        detail_rows.append({
+                            '상태': _d_status,
+                            '바코드': _bc_d,
+                            '상품명': _v_d['상품명'],
+                            '배대지박스': _it_d.get('dapae_box', '') or '-',
+                            '송장': _it_d.get('ship', ''),
+                            '필요': _d_n,
+                            '스캔': _d_s,
+                            '남음': max(0, _d_n - _d_s),
+                        })
+                # 배대지박스 → 송장 → 바코드 순 정렬
+                detail_rows.sort(key=lambda r: (
+                    _box_sort_key(r['배대지박스']) if r['배대지박스'] != '-' else ('ZZZ', 99999),
+                    r['송장'], r['바코드'],
+                ))
+                st.markdown(
+                    f"#### 📦 {_sel_ent['box_num']}번 박스 상세 "
+                    f"{_sel_size_emo}{_sel_size_lbl} — {_sel_ent['scanned']}/{_sel_ent['needed']}개 "
+                    f"({_sel_ent['sku_done']}/{_sel_ent['sku_total']} SKU, 송장 {len(_sel_ent['ships'])}개)"
+                )
+                st.dataframe(
+                    _pd2.DataFrame(detail_rows),
+                    use_container_width=True, hide_index=True,
+                    height=min(500, len(detail_rows) * 38 + 40),
+                )
 
         # 미스캔 항목
         incomplete = []
