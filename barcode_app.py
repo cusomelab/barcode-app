@@ -2936,12 +2936,14 @@ with tab8:
     )
 
     if pick_mode == "📊 구글 시트 (실시간)":
+        # 기본 출고확인 고정 시트 (운영용)
+        _DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=224790693#gid=224790693"
         # 페이지 새로고침 시에도 유지되도록 query_params에서 복원
         _qp = st.query_params
-        if 'pick_url_출고' not in st.session_state and _qp.get('pu'):
-            st.session_state['pick_url_출고'] = _qp.get('pu', '')
-        if 'pick_tab_출고' not in st.session_state and _qp.get('pt'):
-            st.session_state['pick_tab_출고'] = _qp.get('pt', '출고확인')
+        if 'pick_url_출고' not in st.session_state:
+            st.session_state['pick_url_출고'] = _qp.get('pu') or _DEFAULT_SHEET_URL
+        if 'pick_tab_출고' not in st.session_state:
+            st.session_state['pick_tab_출고'] = _qp.get('pt') or '출고확인'
         if 'pick_url_배대지' not in st.session_state and _qp.get('bu'):
             st.session_state['pick_url_배대지'] = _qp.get('bu', '')
         if 'pick_tab_배대지' not in st.session_state and _qp.get('bt'):
