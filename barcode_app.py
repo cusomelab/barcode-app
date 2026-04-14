@@ -3699,6 +3699,74 @@ with tab8:
             header = f'📦 **활성 배대지 박스 {len(active_boxes)}개 — 준비할 출고박스 총 {total_out_count}개**'
             st.info(header + '\n\n' + '\n\n'.join(active_info_lines))
 
+            # ── 활성 박스별 빠른 완료 처리 버튼 (expander 밖으로 노출) ──
+            def _mark_box_done_bulk(target_box):
+                """배대지 박스 안의 모든 항목을 완료 처리 + 시트 L열 일괄 업데이트"""
+                updates_for_sheet = []
+                for _bc2, _v2 in sort_state.items():
+                    for _it2 in _v2['items']:
+                        if str(_it2.get('dapae_box', '')).strip().upper() == target_box:
+                            _it2['scanned'] = _it2['needed']
+                for _bc2, _v2 in sort_state.items():
+                    _ship_cum = {}
+                    touched_in_box = False
+                    for _it2 in _v2['items']:
+                        _dp2 = str(_it2.get('dapae_box', '')).strip().upper()
+                        _ship2 = _it2.get('ship', '')
+                        if _dp2 == target_box:
+                            touched_in_box = True
+                        if _ship2:
+                            _ship_cum[_ship2] = _ship_cum.get(_ship2, 0) + _it2['scanned']
+                    if touched_in_box:
+                        for _s2, _c2 in _ship_cum.items():
+                            updates_for_sheet.append((_bc2, _s2, _c2))
+                if (st.session_state.get('pick_use_gsheet')
+                        and st.session_state.get('pick_gsheet_client')
+                        and st.session_state.get('pick_sheet_url_출고')
+                        and st.session_state.get('pick_sheet_tab_출고')
+                        and updates_for_sheet):
+                    import threading
+                    _client = st.session_state.pick_gsheet_client
+                    _url = st.session_state.pick_sheet_url_출고
+                    _tab = st.session_state.pick_sheet_tab_출고
+                    def _bg_bulk():
+                        for _ub, _us, _uq in updates_for_sheet:
+                            try:
+                                pick_update_check_qty(_client, _url, _tab, _ub, _us, _uq)
+                            except Exception:
+                                pass
+                    threading.Thread(target=_bg_bulk, daemon=True).start()
+                    return True, len(updates_for_sheet)
+                return False, 0
+
+            st.markdown('##### ✅ 박스 완료 처리 (이미 끝낸 배대지 박스)')
+            _done_cols = st.columns(min(4, len(active_boxes)) or 1)
+            for _i, _b in enumerate(sorted(active_boxes, key=_box_sort_key)):
+                _info = box_qty_map[_b]
+                _cur_s = 0
+                _cur_n = 0
+                for _bc_x, _v_x in sort_state.items():
+                    for _it_x in _v_x['items']:
+                        if str(_it_x.get('dapae_box', '')).strip().upper() == _b:
+                            _cur_s += _it_x['scanned']
+                            _cur_n += _it_x['needed']
+                _is_done = _cur_s >= _cur_n and _cur_n > 0
+                _label = f'✅ {_b} 완료 처리' if not _is_done else f'✔ {_b} 이미 완료'
+                with _done_cols[_i % len(_done_cols)]:
+                    if st.button(
+                        _label,
+                        key=f'sort_quick_done_{_b}',
+                        use_container_width=True,
+                        type='primary' if not _is_done else 'secondary',
+                        disabled=_is_done,
+                    ):
+                        ok, n = _mark_box_done_bulk(_b)
+                        if ok:
+                            st.success(f'✅ {_b} 완료 처리 — 시트 L열 업데이트 중 ({n}건)')
+                        else:
+                            st.success(f'✅ {_b} 완료 처리 (세션만, 시트 미연결)')
+                        st.rerun()
+
             # ── 활성 배대지 박스별 → 각 출고박스에 들어갈 내용물 리스트 ──
             st.markdown('#### 📋 출고박스에 담을 내용물 (배대지 박스 → 출고박스별)')
             active_set_upper = set(str(b).strip().upper() for b in active_boxes)
