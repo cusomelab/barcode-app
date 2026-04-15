@@ -1162,11 +1162,22 @@ def pick_init_picking(shipment_ids):
     st.session_state.pick_last_scan_result = None
     st.session_state.pick_scan_counter = 0
 
-def pick_process_scan(barcode):
+def pick_process_scan(barcode, qty=1):
     barcode = barcode.strip()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state = st.session_state.pick_picking_state
     inventory = st.session_state.pick_inventory_state
+
+    # #MULTI 트리거 → 수량 입력 모드 진입
+    if barcode.upper() == "#MULTI":
+        st.session_state.pick_qty_input_mode = True
+        st.session_state.pick_next_qty = 1
+        result = {"status": "multi_trigger", "message": "🔢 다량 입력 모드",
+                  "detail": "수량을 입력한 후 상품 바코드를 스캔하세요",
+                  "barcode": barcode, "상품명": "", "시간": now}
+        st.session_state.pick_last_scan_result = result
+        st.session_state.pick_scan_counter += 1
+        return result
 
     if barcode not in state:
         df = st.session_state.pick_df_출고
@@ -1187,49 +1198,88 @@ def pick_process_scan(barcode):
         return result
 
     item = state[barcode]
-    item["스캔수량"] += 1
+    qty = max(1, int(qty))
+    needed = item["필요수량"]
+    prev_scanned = item["스캔수량"]
 
-    # 다중 쉽먼트일 때 어느 박스에 담을지 결정 (송장별수량 기준 순서대로)
-    box_label = ""
-    if "송장별수량" in item:
-        cumulative = 0
-        for ship_label, ship_qty in item["송장별수량"].items():
-            cumulative += ship_qty
-            if item["스캔수량"] <= cumulative:
-                box_label = ship_label
-                break
-
-    if item["스캔수량"] > item["필요수량"]:
+    # 이미 다 찬 상태에서 추가 스캔 → 전량 초과
+    if prev_scanned >= needed:
+        item["스캔수량"] += qty
+        box_label = ""
+        if "송장별수량" in item and item["송장별수량"]:
+            box_label = list(item["송장별수량"].keys())[-1]
         result = {"status": "over", "message": f"⚠️ 수량 초과! {item['상품명'][:35]}",
-                  "detail": f"필요 {item['필요수량']}개인데 {item['스캔수량']}번째 스캔",
+                  "detail": f"필요 {needed}개 전부 스캔됨 (+{qty} 추가)",
                   "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label}
         st.session_state.pick_scan_log.append(result)
         st.session_state.pick_last_scan_result = result
         st.session_state.pick_scan_counter += 1
+        # 다량 모드 1회성 해제
+        st.session_state.pick_next_qty = 1
+        st.session_state.pick_qty_input_mode = False
         return result
 
+    # 정상 처리: qty 만큼 증가 (초과분 포함)
+    item["스캔수량"] += qty
+    over_qty = max(0, item["스캔수량"] - needed)
+    effective_inc = qty - over_qty  # 실제 유효 스캔 수
+
+    # 박스 라벨: 마지막 유효 유닛 기준
+    box_label = ""
+    if "송장별수량" in item:
+        cumulative = 0
+        last_valid_scan = min(item["스캔수량"], needed)
+        for ship_label, ship_qty in item["송장별수량"].items():
+            cumulative += ship_qty
+            if last_valid_scan <= cumulative:
+                box_label = ship_label
+                break
+
+    # 재고 차감 (유효분만)
     symbol = item["회차기호"]
     inv_key = (symbol, barcode)
     shortage_warning = ""
-    if inv_key in inventory:
-        if inventory[inv_key] > 0:
-            inventory[inv_key] -= 1
+    sheet_decrement = 0
+    if inv_key in inventory and effective_inc > 0:
+        available = inventory[inv_key]
+        if available >= effective_inc:
+            inventory[inv_key] -= effective_inc
             item["배대지잔여"] = inventory[inv_key]
+            sheet_decrement = effective_inc
         else:
-            shortage_warning = f" | ⚠ {symbol}회차 배대지 재고 소진!"
+            sheet_decrement = available
+            inventory[inv_key] = 0
             item["배대지잔여"] = 0
+            shortage_warning = f" | ⚠ {symbol}회차 배대지 재고 소진!"
+    elif inv_key in inventory:
+        item["배대지잔여"] = inventory[inv_key]
 
-    remaining = item["필요수량"] - item["스캔수량"]
+    remaining = max(0, needed - item["스캔수량"])
     box_msg = f" → {box_label}" if box_label else ""
+    qty_label = f" ×{qty}" if qty > 1 else ""
+    if over_qty > 0:
+        status = "over"
+        message = f"⚠️ 수량 초과! {item['상품명'][:35]}{box_msg}"
+        detail = f"스캔 {item['스캔수량']}/{needed} (+{over_qty} 초과){shortage_warning}"
+    else:
+        status = "shortage" if shortage_warning else "ok"
+        message = f"✅ {item['상품명'][:35]}{box_msg}{qty_label}"
+        detail = f"스캔 {item['스캔수량']}/{needed} (남은: {remaining}){shortage_warning}"
+
     result = {
-        "status": "ok" if not shortage_warning else "shortage",
-        "message": f"✅ {item['상품명'][:35]}{box_msg}",
-        "detail": f"스캔 {item['스캔수량']}/{item['필요수량']} (남은: {remaining}){shortage_warning}",
+        "status": status,
+        "message": message,
+        "detail": detail,
         "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label,
+        "처리수량": qty,
     }
     st.session_state.pick_scan_log.append(result)
     st.session_state.pick_last_scan_result = result
     st.session_state.pick_scan_counter += 1
+
+    # 다량 모드는 1회성 → 1개 모드로 복귀
+    st.session_state.pick_next_qty = 1
+    st.session_state.pick_qty_input_mode = False
 
     if st.session_state.pick_use_gsheet and st.session_state.pick_gsheet_client:
         import threading
@@ -1237,16 +1287,17 @@ def pick_process_scan(barcode):
                    item["상품명"][:40], result["status"], item["스캔수량"],
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
+        _dec = sheet_decrement
         # 백그라운드 스레드로 구글 시트 업데이트 (스캔 속도 향상)
         def _bg_sheet_update():
             try:
                 pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
-                if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
+                if result["status"] in ("ok", "shortage") and _dec > 0 and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
                     pick_update_sheet_inventory(
                         st.session_state.pick_gsheet_client,
                         st.session_state.pick_sheet_url_배대지,
                         st.session_state.pick_sheet_tab_배대지,
-                        barcode, decrement=1
+                        barcode, decrement=_dec
                     )
             except Exception:
                 pass
@@ -3216,11 +3267,59 @@ with tab8:
                     </script>""", height=0)
 
             st.markdown("---")
+
+            # 다량 모드 상태 초기화
+            if 'pick_next_qty' not in st.session_state:
+                st.session_state.pick_next_qty = 1
+            if 'pick_qty_input_mode' not in st.session_state:
+                st.session_state.pick_qty_input_mode = False
+
+            # 수량 입력 모드: 숫자 입력 후 Enter
+            if st.session_state.pick_qty_input_mode:
+                st.warning('🔢 **수량을 입력하세요** — 숫자 입력 후 Enter')
+                pick_qty_text_key = f'pick_qty_text_{st.session_state.pick_scan_counter}'
+                pick_qty_text = st.text_input(
+                    '다량 수량',
+                    key=pick_qty_text_key,
+                    placeholder='숫자 입력 후 Enter (예: 50)',
+                    label_visibility='collapsed',
+                )
+                if pick_qty_text:
+                    try:
+                        _qv = int(pick_qty_text.strip())
+                        if _qv >= 1:
+                            st.session_state.pick_next_qty = _qv
+                            st.session_state.pick_qty_input_mode = False
+                            st.session_state.pick_scan_counter += 1
+                            st.rerun()
+                    except ValueError:
+                        st.error('숫자만 입력 가능합니다')
+
+            # 수량 표시 + 1개 모드 리셋 버튼
+            pqcol1, pqcol2 = st.columns([1, 1])
+            with pqcol1:
+                if st.session_state.pick_next_qty > 1:
+                    st.markdown(
+                        f'<div style="background:#f59e0b;color:white;padding:0.5rem;border-radius:6px;text-align:center;font-weight:bold;font-size:1.1rem">'
+                        f'📦 다음 스캔: {st.session_state.pick_next_qty}개'
+                        f'</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        '<div style="background:#e5e7eb;padding:0.5rem;border-radius:6px;text-align:center">'
+                        '1개 모드'
+                        '</div>', unsafe_allow_html=True)
+            with pqcol2:
+                if st.session_state.pick_next_qty > 1 and not st.session_state.pick_qty_input_mode:
+                    if st.button('🔄 1개 모드로 복귀', key='pick_qty_reset', use_container_width=True):
+                        st.session_state.pick_next_qty = 1
+                        st.rerun()
+
             scan_key = f"pick_scan_{st.session_state.pick_scan_counter}"
             scanned = st.text_input("🔫 바코드 스캔 (스캐너 또는 직접 입력)", key=scan_key,
-                                    placeholder="스캐너 대기 중... 바코드를 스캔하세요")
+                                    placeholder="스캐너 대기 중... 바코드 (여러 개면 #MULTI 먼저)")
             if scanned:
-                pick_process_scan(scanned)
+                _pick_qty = int(st.session_state.get('pick_next_qty', 1) or 1)
+                pick_process_scan(scanned, qty=_pick_qty)
                 st.rerun()
 
             # 바코드 입력창에 자동 포커스 유지
