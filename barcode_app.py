@@ -357,14 +357,19 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     # 배대지 박스별 수량 요약도 함께 표시 (예: "58번 M2(10),W11(93)")
     def _extract_box_key(bn_raw):
         """boxNumber 값에서 배대지 박스 키(M2, W11 등)만 추출.
-        국내재고/부족/RAW 등은 제외, 알파벳+숫자 형식만 유효."""
+        실제 포맷 예: '★M12(1)' → 'M12', 'W3(5)' → 'W3', 'M2' → 'M2'
+        국내재고/부족/RAW 등은 제외."""
         import re as _re_ek
-        s = str(bn_raw or '').strip().upper()
-        if not s or s == 'NAN':
+        s = str(bn_raw or '').strip()
+        if not s or s.lower() == 'nan':
             return ''
         if any(kw in s for kw in ('국내', '부족', '재고', 'RAW')):
             return ''
-        m = _re_ek.match(r'^([A-Z]*\d+)$', s)
+        # 기호(★●■ 등) 프리픽스와 (N) 수량 무시하고 박스키만 추출
+        m = _re_ek.search(r'([A-Za-z]+\d+)', s)
+        if m:
+            return m.group(1).upper()
+        m = _re_ek.search(r'(\d+)', s)
         return m.group(1) if m else ''
 
     dapae_summary_str = ''
