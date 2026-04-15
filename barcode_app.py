@@ -1161,6 +1161,9 @@ def pick_init_picking(shipment_ids):
     st.session_state.pick_scan_log = []
     st.session_state.pick_last_scan_result = None
     st.session_state.pick_scan_counter = 0
+    # 다량 모드 상태 초기화 (이전 쉽먼트의 모드가 끌려오지 않도록)
+    st.session_state.pick_next_qty = 1
+    st.session_state.pick_qty_input_mode = False
 
 def pick_process_scan(barcode, qty=1):
     barcode = barcode.strip()
@@ -3184,13 +3187,22 @@ with tab8:
                     st.rerun()
             with hcol3:
                 if st.button("🔄 다른 쉽먼트", use_container_width=True, key="pick_change_btn"):
+                    # 쉽먼트 관련 상태 완전 초기화 (로그/재고/완료목록은 유지)
                     st.session_state.pick_selected_shipment = None
                     st.session_state.pick_selected_shipments = []
-                    # 입력칸 초기화
-                    for k in ('pick_shipment_input', 'pick_add_shipment_input'):
+                    st.session_state.pick_picking_state = {}
+                    st.session_state.pick_shortage_items = []
+                    st.session_state.pick_last_scan_result = None
+                    st.session_state.pick_scan_counter = 0
+                    st.session_state.pick_show_add_input = False
+                    # 다량 모드 상태 초기화
+                    st.session_state.pick_next_qty = 1
+                    st.session_state.pick_qty_input_mode = False
+                    # 입력/선택 위젯 상태 초기화 (이전 선택이 끌려오지 않도록)
+                    for k in ('pick_shipment_input', 'pick_add_shipment_input',
+                              'pick_shipment_select', 'pick_center_filter'):
                         if k in st.session_state:
                             del st.session_state[k]
-                    st.session_state.pick_show_add_input = False
                     st.rerun()
 
             # 쉽먼트 추가 입력 영역
