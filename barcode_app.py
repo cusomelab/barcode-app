@@ -3189,10 +3189,31 @@ with tab8:
 
             if progress["is_complete"]:
                 st.markdown(
-                    f'<div class="scan-complete"><strong style="font-size:1.3rem;">🎉 피킹 완료!</strong><br>'
-                    f'쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</div>',
+                    f'<div class="scan-complete">'
+                    f'<strong style="font-size:1.4rem;">🎉 검증확인이 완료되었습니다. 출고하세요!</strong><br>'
+                    f'<span style="font-size:1.05rem;">쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</span>'
+                    f'</div>',
                     unsafe_allow_html=True)
+                # 신규 완료 시 1회만 음성 안내
+                _newly_done = shipment_id not in st.session_state.pick_completed_shipments
                 st.session_state.pick_completed_shipments.add(shipment_id)
+                if _newly_done:
+                    from streamlit.components.v1 import html as _st_html_done
+                    _st_html_done("""<script>
+                    try{
+                        window.speechSynthesis.cancel();
+                        setTimeout(function(){
+                            var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
+                            u.lang = 'ko-KR';
+                            u.rate = 1.15;
+                            u.volume = 1.0;
+                            var voices = window.speechSynthesis.getVoices();
+                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                            if (koVoice) u.voice = koVoice;
+                            window.speechSynthesis.speak(u);
+                        }, 120);
+                    }catch(e){}
+                    </script>""", height=0)
 
             st.markdown("---")
             scan_key = f"pick_scan_{st.session_state.pick_scan_counter}"
