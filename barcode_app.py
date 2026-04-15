@@ -1161,12 +1161,26 @@ def pick_init_picking(shipment_ids):
     st.session_state.pick_scan_log = []
     st.session_state.pick_last_scan_result = None
     st.session_state.pick_scan_counter = 0
+    # 다량 모드 상태 초기화 (이전 쉽먼트의 모드가 끌려오지 않도록)
+    st.session_state.pick_next_qty = 1
+    st.session_state.pick_qty_input_mode = False
 
-def pick_process_scan(barcode):
+def pick_process_scan(barcode, qty=1):
     barcode = barcode.strip()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state = st.session_state.pick_picking_state
     inventory = st.session_state.pick_inventory_state
+
+    # #MULTI 트리거 → 수량 입력 모드 진입
+    if barcode.upper() == "#MULTI":
+        st.session_state.pick_qty_input_mode = True
+        st.session_state.pick_next_qty = 1
+        result = {"status": "multi_trigger", "message": "🔢 다량 입력 모드",
+                  "detail": "수량을 입력한 후 상품 바코드를 스캔하세요",
+                  "barcode": barcode, "상품명": "", "시간": now}
+        st.session_state.pick_last_scan_result = result
+        st.session_state.pick_scan_counter += 1
+        return result
 
     if barcode not in state:
         df = st.session_state.pick_df_출고
@@ -1187,49 +1201,88 @@ def pick_process_scan(barcode):
         return result
 
     item = state[barcode]
-    item["스캔수량"] += 1
+    qty = max(1, int(qty))
+    needed = item["필요수량"]
+    prev_scanned = item["스캔수량"]
 
-    # 다중 쉽먼트일 때 어느 박스에 담을지 결정 (송장별수량 기준 순서대로)
-    box_label = ""
-    if "송장별수량" in item:
-        cumulative = 0
-        for ship_label, ship_qty in item["송장별수량"].items():
-            cumulative += ship_qty
-            if item["스캔수량"] <= cumulative:
-                box_label = ship_label
-                break
-
-    if item["스캔수량"] > item["필요수량"]:
+    # 이미 다 찬 상태에서 추가 스캔 → 전량 초과
+    if prev_scanned >= needed:
+        item["스캔수량"] += qty
+        box_label = ""
+        if "송장별수량" in item and item["송장별수량"]:
+            box_label = list(item["송장별수량"].keys())[-1]
         result = {"status": "over", "message": f"⚠️ 수량 초과! {item['상품명'][:35]}",
-                  "detail": f"필요 {item['필요수량']}개인데 {item['스캔수량']}번째 스캔",
+                  "detail": f"필요 {needed}개 전부 스캔됨 (+{qty} 추가)",
                   "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label}
         st.session_state.pick_scan_log.append(result)
         st.session_state.pick_last_scan_result = result
         st.session_state.pick_scan_counter += 1
+        # 다량 모드 1회성 해제
+        st.session_state.pick_next_qty = 1
+        st.session_state.pick_qty_input_mode = False
         return result
 
+    # 정상 처리: qty 만큼 증가 (초과분 포함)
+    item["스캔수량"] += qty
+    over_qty = max(0, item["스캔수량"] - needed)
+    effective_inc = qty - over_qty  # 실제 유효 스캔 수
+
+    # 박스 라벨: 마지막 유효 유닛 기준
+    box_label = ""
+    if "송장별수량" in item:
+        cumulative = 0
+        last_valid_scan = min(item["스캔수량"], needed)
+        for ship_label, ship_qty in item["송장별수량"].items():
+            cumulative += ship_qty
+            if last_valid_scan <= cumulative:
+                box_label = ship_label
+                break
+
+    # 재고 차감 (유효분만)
     symbol = item["회차기호"]
     inv_key = (symbol, barcode)
     shortage_warning = ""
-    if inv_key in inventory:
-        if inventory[inv_key] > 0:
-            inventory[inv_key] -= 1
+    sheet_decrement = 0
+    if inv_key in inventory and effective_inc > 0:
+        available = inventory[inv_key]
+        if available >= effective_inc:
+            inventory[inv_key] -= effective_inc
             item["배대지잔여"] = inventory[inv_key]
+            sheet_decrement = effective_inc
         else:
-            shortage_warning = f" | ⚠ {symbol}회차 배대지 재고 소진!"
+            sheet_decrement = available
+            inventory[inv_key] = 0
             item["배대지잔여"] = 0
+            shortage_warning = f" | ⚠ {symbol}회차 배대지 재고 소진!"
+    elif inv_key in inventory:
+        item["배대지잔여"] = inventory[inv_key]
 
-    remaining = item["필요수량"] - item["스캔수량"]
+    remaining = max(0, needed - item["스캔수량"])
     box_msg = f" → {box_label}" if box_label else ""
+    qty_label = f" ×{qty}" if qty > 1 else ""
+    if over_qty > 0:
+        status = "over"
+        message = f"⚠️ 수량 초과! {item['상품명'][:35]}{box_msg}"
+        detail = f"스캔 {item['스캔수량']}/{needed} (+{over_qty} 초과){shortage_warning}"
+    else:
+        status = "shortage" if shortage_warning else "ok"
+        message = f"✅ {item['상품명'][:35]}{box_msg}{qty_label}"
+        detail = f"스캔 {item['스캔수량']}/{needed} (남은: {remaining}){shortage_warning}"
+
     result = {
-        "status": "ok" if not shortage_warning else "shortage",
-        "message": f"✅ {item['상품명'][:35]}{box_msg}",
-        "detail": f"스캔 {item['스캔수량']}/{item['필요수량']} (남은: {remaining}){shortage_warning}",
+        "status": status,
+        "message": message,
+        "detail": detail,
         "barcode": barcode, "상품명": item["상품명"], "시간": now, "박스": box_label,
+        "처리수량": qty,
     }
     st.session_state.pick_scan_log.append(result)
     st.session_state.pick_last_scan_result = result
     st.session_state.pick_scan_counter += 1
+
+    # 다량 모드는 1회성 → 1개 모드로 복귀
+    st.session_state.pick_next_qty = 1
+    st.session_state.pick_qty_input_mode = False
 
     if st.session_state.pick_use_gsheet and st.session_state.pick_gsheet_client:
         import threading
@@ -1237,16 +1290,17 @@ def pick_process_scan(barcode):
                    item["상품명"][:40], result["status"], item["스캔수량"],
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
+        _dec = sheet_decrement
         # 백그라운드 스레드로 구글 시트 업데이트 (스캔 속도 향상)
         def _bg_sheet_update():
             try:
                 pick_append_log(st.session_state.pick_gsheet_client, log_url, log_row)
-                if result["status"] in ("ok", "shortage") and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
+                if result["status"] in ("ok", "shortage") and _dec > 0 and st.session_state.pick_sheet_url_배대지 and st.session_state.pick_sheet_tab_배대지:
                     pick_update_sheet_inventory(
                         st.session_state.pick_gsheet_client,
                         st.session_state.pick_sheet_url_배대지,
                         st.session_state.pick_sheet_tab_배대지,
-                        barcode, decrement=1
+                        barcode, decrement=_dec
                     )
             except Exception:
                 pass
@@ -3133,13 +3187,22 @@ with tab8:
                     st.rerun()
             with hcol3:
                 if st.button("🔄 다른 쉽먼트", use_container_width=True, key="pick_change_btn"):
+                    # 쉽먼트 관련 상태 완전 초기화 (로그/재고/완료목록은 유지)
                     st.session_state.pick_selected_shipment = None
                     st.session_state.pick_selected_shipments = []
-                    # 입력칸 초기화
-                    for k in ('pick_shipment_input', 'pick_add_shipment_input'):
+                    st.session_state.pick_picking_state = {}
+                    st.session_state.pick_shortage_items = []
+                    st.session_state.pick_last_scan_result = None
+                    st.session_state.pick_scan_counter = 0
+                    st.session_state.pick_show_add_input = False
+                    # 다량 모드 상태 초기화
+                    st.session_state.pick_next_qty = 1
+                    st.session_state.pick_qty_input_mode = False
+                    # 입력/선택 위젯 상태 초기화 (이전 선택이 끌려오지 않도록)
+                    for k in ('pick_shipment_input', 'pick_add_shipment_input',
+                              'pick_shipment_select', 'pick_center_filter'):
                         if k in st.session_state:
                             del st.session_state[k]
-                    st.session_state.pick_show_add_input = False
                     st.rerun()
 
             # 쉽먼트 추가 입력 영역
@@ -3189,126 +3252,211 @@ with tab8:
 
             if progress["is_complete"]:
                 st.markdown(
-                    f'<div class="scan-complete"><strong style="font-size:1.3rem;">🎉 피킹 완료!</strong><br>'
-                    f'쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</div>',
+                    f'<div class="scan-complete">'
+                    f'<strong style="font-size:1.4rem;">🎉 검증확인이 완료되었습니다. 출고하세요!</strong><br>'
+                    f'<span style="font-size:1.05rem;">쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</span>'
+                    f'</div>',
                     unsafe_allow_html=True)
+                # 신규 완료 시 1회만 음성 안내
+                _newly_done = shipment_id not in st.session_state.pick_completed_shipments
                 st.session_state.pick_completed_shipments.add(shipment_id)
+                if _newly_done:
+                    from streamlit.components.v1 import html as _st_html_done
+                    _st_html_done("""<script>
+                    try{
+                        window.speechSynthesis.cancel();
+                        setTimeout(function(){
+                            var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
+                            u.lang = 'ko-KR';
+                            u.rate = 1.15;
+                            u.volume = 1.0;
+                            var voices = window.speechSynthesis.getVoices();
+                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                            if (koVoice) u.voice = koVoice;
+                            window.speechSynthesis.speak(u);
+                        }, 120);
+                    }catch(e){}
+                    </script>""", height=0)
 
             st.markdown("---")
-            scan_key = f"pick_scan_{st.session_state.pick_scan_counter}"
-            scanned = st.text_input("🔫 바코드 스캔 (스캐너 또는 직접 입력)", key=scan_key,
-                                    placeholder="스캐너 대기 중... 바코드를 스캔하세요")
-            if scanned:
-                pick_process_scan(scanned)
-                st.rerun()
 
-            # 바코드 입력창에 자동 포커스 유지
-            from streamlit.components.v1 import html as _st_html
-            _st_html("""<script>
-            (function(){
-                const doc = window.parent.document;
-                function findScanInput() {
-                    const inputs = doc.querySelectorAll('input[type="text"]');
-                    for (const inp of inputs) {
-                        if (inp.placeholder && inp.placeholder.includes('스캐너')) {
-                            return inp;
+            # ── 바코드 스캔 (fragment으로 감싸서 전체 앱 리런 없이 조각만 재실행) ──
+            def _pick_scan_rerun():
+                """Fragment 내부면 조각 리런, 아니면 전체 리런 (구버전 Streamlit fallback)."""
+                try:
+                    st.rerun(scope='fragment')
+                except TypeError:
+                    st.rerun()
+                except Exception:
+                    st.rerun()
+
+            _pick_use_fragment = getattr(st, 'fragment', lambda f: f)
+
+            @_pick_use_fragment
+            def _pick_scan_fragment():
+                # 다량 모드 상태 초기화
+                if 'pick_next_qty' not in st.session_state:
+                    st.session_state.pick_next_qty = 1
+                if 'pick_qty_input_mode' not in st.session_state:
+                    st.session_state.pick_qty_input_mode = False
+
+                # 수량 입력 모드: 숫자 입력 후 Enter
+                if st.session_state.pick_qty_input_mode:
+                    st.warning('🔢 **수량을 입력하세요** — 숫자 입력 후 Enter')
+                    pick_qty_text_key = f'pick_qty_text_{st.session_state.pick_scan_counter}'
+                    pick_qty_text = st.text_input(
+                        '다량 수량',
+                        key=pick_qty_text_key,
+                        placeholder='숫자 입력 후 Enter (예: 50)',
+                        label_visibility='collapsed',
+                    )
+                    if pick_qty_text:
+                        try:
+                            _qv = int(pick_qty_text.strip())
+                            if _qv >= 1:
+                                st.session_state.pick_next_qty = _qv
+                                st.session_state.pick_qty_input_mode = False
+                                st.session_state.pick_scan_counter += 1
+                                _pick_scan_rerun()
+                        except ValueError:
+                            st.error('숫자만 입력 가능합니다')
+
+                # 수량 표시 + 1개 모드 리셋 버튼
+                pqcol1, pqcol2 = st.columns([1, 1])
+                with pqcol1:
+                    if st.session_state.pick_next_qty > 1:
+                        st.markdown(
+                            f'<div style="background:#f59e0b;color:white;padding:0.5rem;border-radius:6px;text-align:center;font-weight:bold;font-size:1.1rem">'
+                            f'📦 다음 스캔: {st.session_state.pick_next_qty}개'
+                            f'</div>', unsafe_allow_html=True)
+                    else:
+                        st.markdown(
+                            '<div style="background:#e5e7eb;padding:0.5rem;border-radius:6px;text-align:center">'
+                            '1개 모드'
+                            '</div>', unsafe_allow_html=True)
+                with pqcol2:
+                    if st.session_state.pick_next_qty > 1 and not st.session_state.pick_qty_input_mode:
+                        if st.button('🔄 1개 모드로 복귀', key='pick_qty_reset', use_container_width=True):
+                            st.session_state.pick_next_qty = 1
+                            _pick_scan_rerun()
+
+                scan_key = f"pick_scan_{st.session_state.pick_scan_counter}"
+                scanned = st.text_input("🔫 바코드 스캔 (스캐너 또는 직접 입력)", key=scan_key,
+                                        placeholder="스캐너 대기 중... 바코드 (여러 개면 #MULTI 먼저)")
+                if scanned:
+                    _pick_qty = int(st.session_state.get('pick_next_qty', 1) or 1)
+                    pick_process_scan(scanned, qty=_pick_qty)
+                    _pick_scan_rerun()
+
+                # 바코드 입력창에 자동 포커스 유지
+                from streamlit.components.v1 import html as _st_html
+                _st_html("""<script>
+                (function(){
+                    const doc = window.parent.document;
+                    function findScanInput() {
+                        const inputs = doc.querySelectorAll('input[type="text"]');
+                        for (const inp of inputs) {
+                            if (inp.placeholder && inp.placeholder.includes('스캐너')) {
+                                return inp;
+                            }
+                        }
+                        return null;
+                    }
+                    function focusScan() {
+                        const inp = findScanInput();
+                        if (inp && doc.activeElement !== inp) {
+                            inp.focus();
                         }
                     }
-                    return null;
-                }
-                function focusScan() {
-                    const inp = findScanInput();
-                    if (inp && doc.activeElement !== inp) {
-                        inp.focus();
-                    }
-                }
-                // 즉시 포커스
-                focusScan();
-                // 짧은 간격으로 반복 (0.3초)
-                if (window._scanFocusInterval) clearInterval(window._scanFocusInterval);
-                window._scanFocusInterval = setInterval(focusScan, 300);
-                // DOM 변경 감지 시에도 포커스
-                if (window._scanObserver) window._scanObserver.disconnect();
-                window._scanObserver = new MutationObserver(focusScan);
-                window._scanObserver.observe(doc.body, {childList: true, subtree: true});
-                // 다른 곳 클릭해도 입력창으로 복귀 (단, 버튼/링크 제외)
-                doc.addEventListener('click', function(e){
-                    const tag = (e.target.tagName||'').toLowerCase();
-                    if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return;
-                    setTimeout(focusScan, 50);
-                }, true);
-            })();
-            </script>""", height=0)
-
-            r = st.session_state.pick_last_scan_result
-            if r:
-                css_class = {"ok":"scan-ok","over":"scan-warning","error":"scan-error","shortage":"scan-shortage"}.get(r["status"],"scan-ok")
-                st.markdown(
-                    f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
-                    unsafe_allow_html=True)
-                # 스캔 결과 소리 (비프음)
-                sound_js = {
-                    "ok": "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);",
-                    "error": "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);",
-                    "over": "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>{o.frequency.value=300},100);setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);",
-                    "shortage": "o.frequency.value=600;g.gain.value=0.3;o.start();setTimeout(()=>{o.frequency.value=400},100);setTimeout(()=>g.gain.value=0,250);setTimeout(()=>o.stop(),300);",
-                }
-                js_code = sound_js.get(r["status"], sound_js["ok"])
-
-                # 음성 안내 (한국어 TTS)
-                box_label = r.get("박스", "")
-                # 1번박스 → 일번박스 형태로 변환
-                _KOR_NUMS = {'1':'일','2':'이','3':'삼','4':'사','5':'오','6':'육','7':'칠','8':'팔','9':'구','10':'십'}
-                def _kor_box(label):
-                    import re as _re
-                    m = _re.match(r'(\d+)번박스', label or '')
-                    if not m:
-                        return label
-                    n = m.group(1)
-                    kor = _KOR_NUMS.get(n, n)
-                    return f"{kor}번박스"
-                box_kor = _kor_box(box_label)
-
-                ships_count = len(st.session_state.get('pick_selected_shipments', []))
-                if r["status"] == "error":
-                    speak_text = "없는 상품 입니다"
-                elif r["status"] == "over":
-                    speak_text = "수량 초과"
-                elif r["status"] == "shortage":
-                    if ships_count <= 1:
-                        speak_text = "입고완료 재고 부족"
-                    else:
-                        speak_text = f"{box_kor} 재고 부족" if box_kor else "재고 부족"
-                elif ships_count <= 1:
-                    speak_text = "입고완료"
-                elif box_kor:
-                    speak_text = f"{box_kor}"
-                else:
-                    speak_text = "확인"
-
-                # JS 문자열 안전 이스케이프
-                speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
-                # 매 스캔마다 새 컴포넌트로 강제 재실행 (같은 박스도 소리 나도록)
-                scan_id = st.session_state.pick_scan_counter
-
-                from streamlit.components.v1 import html as st_html
-                st_html(f"""<script>
-                // scan_id={scan_id} (강제 재실행용)
-                try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
-                try{{
-                    window.speechSynthesis.cancel();
-                    setTimeout(function(){{
-                        var u = new SpeechSynthesisUtterance('{speak_text_js}');
-                        u.lang = 'ko-KR';
-                        u.rate = 1.3;
-                        u.volume = 1.0;
-                        var voices = window.speechSynthesis.getVoices();
-                        var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                        if (koVoice) u.voice = koVoice;
-                        window.speechSynthesis.speak(u);
-                    }}, 100);
-                }}catch(e){{}}
+                    // 즉시 포커스
+                    focusScan();
+                    // 짧은 간격으로 반복 (0.3초)
+                    if (window._scanFocusInterval) clearInterval(window._scanFocusInterval);
+                    window._scanFocusInterval = setInterval(focusScan, 300);
+                    // DOM 변경 감지 시에도 포커스
+                    if (window._scanObserver) window._scanObserver.disconnect();
+                    window._scanObserver = new MutationObserver(focusScan);
+                    window._scanObserver.observe(doc.body, {childList: true, subtree: true});
+                    // 다른 곳 클릭해도 입력창으로 복귀 (단, 버튼/링크 제외)
+                    doc.addEventListener('click', function(e){
+                        const tag = (e.target.tagName||'').toLowerCase();
+                        if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return;
+                        setTimeout(focusScan, 50);
+                    }, true);
+                })();
                 </script>""", height=0)
+
+                r = st.session_state.pick_last_scan_result
+                if r:
+                    css_class = {"ok":"scan-ok","over":"scan-warning","error":"scan-error","shortage":"scan-shortage"}.get(r["status"],"scan-ok")
+                    st.markdown(
+                        f'<div class="{css_class}"><strong style="font-size:1.1rem;">{r["message"]}</strong><br>{r["detail"]}</div>',
+                        unsafe_allow_html=True)
+                    # 스캔 결과 소리 (비프음)
+                    sound_js = {
+                        "ok": "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);",
+                        "error": "o.type='square';o.frequency.value=200;g.gain.value=0.5;o.start();setTimeout(()=>{o.frequency.value=150},150);setTimeout(()=>g.gain.value=0,500);setTimeout(()=>o.stop(),600);",
+                        "over": "o.type='sawtooth';o.frequency.value=400;g.gain.value=0.4;o.start();setTimeout(()=>{o.frequency.value=300},100);setTimeout(()=>g.gain.value=0,300);setTimeout(()=>o.stop(),400);",
+                        "shortage": "o.frequency.value=600;g.gain.value=0.3;o.start();setTimeout(()=>{o.frequency.value=400},100);setTimeout(()=>g.gain.value=0,250);setTimeout(()=>o.stop(),300);",
+                    }
+                    js_code = sound_js.get(r["status"], sound_js["ok"])
+
+                    # 음성 안내 (한국어 TTS)
+                    box_label = r.get("박스", "")
+                    # 1번박스 → 일번박스 형태로 변환
+                    _KOR_NUMS = {'1':'일','2':'이','3':'삼','4':'사','5':'오','6':'육','7':'칠','8':'팔','9':'구','10':'십'}
+                    def _kor_box(label):
+                        import re as _re
+                        m = _re.match(r'(\d+)번박스', label or '')
+                        if not m:
+                            return label
+                        n = m.group(1)
+                        kor = _KOR_NUMS.get(n, n)
+                        return f"{kor}번박스"
+                    box_kor = _kor_box(box_label)
+
+                    ships_count = len(st.session_state.get('pick_selected_shipments', []))
+                    if r["status"] == "error":
+                        speak_text = "없는 상품 입니다"
+                    elif r["status"] == "over":
+                        speak_text = "수량 초과"
+                    elif r["status"] == "shortage":
+                        if ships_count <= 1:
+                            speak_text = "입고완료 재고 부족"
+                        else:
+                            speak_text = f"{box_kor} 재고 부족" if box_kor else "재고 부족"
+                    elif ships_count <= 1:
+                        speak_text = "입고완료"
+                    elif box_kor:
+                        speak_text = f"{box_kor}"
+                    else:
+                        speak_text = "확인"
+
+                    # JS 문자열 안전 이스케이프
+                    speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
+                    # 매 스캔마다 새 컴포넌트로 강제 재실행 (같은 박스도 소리 나도록)
+                    scan_id = st.session_state.pick_scan_counter
+
+                    from streamlit.components.v1 import html as st_html
+                    st_html(f"""<script>
+                    // scan_id={scan_id} (강제 재실행용)
+                    try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
+                    try{{
+                        window.speechSynthesis.cancel();
+                        setTimeout(function(){{
+                            var u = new SpeechSynthesisUtterance('{speak_text_js}');
+                            u.lang = 'ko-KR';
+                            u.rate = 1.3;
+                            u.volume = 1.0;
+                            var voices = window.speechSynthesis.getVoices();
+                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                            if (koVoice) u.voice = koVoice;
+                            window.speechSynthesis.speak(u);
+                        }}, 100);
+                    }}catch(e){{}}
+                    </script>""", height=0)
+
+            _pick_scan_fragment()
 
             st.markdown("---")
             st.subheader("📋 피킹 현황")
@@ -3639,12 +3787,12 @@ with tab8:
         with sac0a:
             capacity = st.number_input(
                 '창고 수용력',
-                min_value=1, max_value=20, value=3,
+                min_value=1, max_value=10, value=1,
                 key='sort_capacity',
-                help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수',
+                help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수 (1 = 한 박스씩 차례대로)',
             )
 
-        # 집합 커버 추천: 미완료 박스 중 수량 많은 배대지 박스부터 + 송장 완성 많이 되는 것 우선
+        # 집합 커버 추천: 수량 절대 우선 (수량 많은 박스부터 → 빠르게 출고박스 채움)
         def _recommend_box_set(target_count, already_committed=None):
             committed = set(already_committed or [])
             picks = []
@@ -3654,11 +3802,11 @@ with tab8:
                 best = None
                 best_score = (-1, -1)
                 for box in available:
-                    trial = committed | set(picks) | {box}
-                    completed = sum(1 for need in ship_need_boxes.values() if need.issubset(trial))
                     qty = box_qty_map[box]['total_qty']
-                    # 점수: (완성되는 송장 수, 수량) — 사용자 요청: 수량 많은 걸로
-                    score = (qty, completed)
+                    ship_cnt = len(box_qty_map[box]['ships'])
+                    # 점수: (수량, -송장수) — 수량 우선 + 동률이면 송장 적은 것(단순한 박스)
+                    # 송장 적을수록 다른 배대지 박스 의존성↓ → 다른 박스 동시에 안 깔아도 됨
+                    score = (qty, -ship_cnt)
                     if score > best_score:
                         best_score = score
                         best = box
@@ -3669,7 +3817,8 @@ with tab8:
             return picks
 
         rec_set = _recommend_box_set(int(capacity))
-        if rec_set:
+        if rec_set and int(capacity) > 1:
+            # 수용력이 2 이상일 때만 세트 안내 (1이면 위의 1순위 추천과 동일하므로 중복 표시 안 함)
             rec_set_sorted = sorted(rec_set, key=_box_sort_key)
             completed_with_set = sum(
                 1 for need in ship_need_boxes.values() if need.issubset(set(rec_set))
@@ -3680,6 +3829,9 @@ with tab8:
                     f'**{", ".join(str(b) + "번" for b in rec_set_sorted)}**  '
                     f'→ 이것만 열면 **{completed_with_set}개 송장** 완성'
                 )
+        elif int(capacity) == 1:
+            with sac0b:
+                st.caption('💡 **1박스씩 처리** — 수량 많은 박스부터 차례로 끝내면 출고박스가 빠르게 채워져요. 동시 작업 원하면 수용력↑')
 
         # ── 활성 박스 (멀티 선택) ──
         if 'sort_active_boxes' not in st.session_state:
@@ -4355,7 +4507,7 @@ with tab8:
                             f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
                             f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번 {size_str} 완료!</div>'
                             f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
-                            f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
+                            f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;word-break:break-all;">마지막 상품: {r["상품명"]}</div>'
                             f'</div>',
                             unsafe_allow_html=True)
                         speak = f'{kor_n}번 완료. 포장하세요'
@@ -4365,7 +4517,7 @@ with tab8:
                         qty_str = f' × {processed_qty}개' if processed_qty > 1 else ''
                         over_str = f' ⚠️ {over_qty}개 초과' if over_qty > 0 else ''
                         st.markdown(
-                            f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
+                            f'<div class="scan-ok" style="word-break:break-all;"><strong style="font-size:1.5rem;">✅ {box_num_str}번{size_str}{qty_str} → {r["상품명"]}</strong><br>'
                             f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개{over_str}</div>',
                             unsafe_allow_html=True)
                         if processed_qty > 1:
