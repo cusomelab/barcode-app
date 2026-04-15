@@ -382,7 +382,11 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
                 dapae_counts[bkey] += it.get('quantity', 0)
         if dapae_counts:
             parts = [f'{k}({v})' for k, v in sorted(dapae_counts.items())]
-            dapae_summary_str = ' ' + ','.join(parts)
+            # '1번'은 48pt, 배대지 구성은 18pt(타이틀 크기)로 축소
+            dapae_summary_str = (
+                f' <font size="18" color="#111111">'
+                f'{",".join(parts)}</font>'
+            )
     big_box_label = f'{box_number}번{dapae_summary_str}' if box_number else ''
 
     # ── 헤더: 좌측 타이틀 + 우측 쉽먼트(+바코드) ──────────
@@ -2169,10 +2173,18 @@ def _group_manifest_pages(pages_info):
         if info['is_main_page']:
             if current:
                 groups.append(current)
-            current = {'box_number': info['box_number'], 'invoice_number': info['invoice_number'], 'page_indices': [info['page_idx']]}
+            current = {
+                'box_number': info['box_number'],
+                'invoice_number': info['invoice_number'],
+                'shipment_id': info.get('shipment_id'),
+                'page_indices': [info['page_idx']],
+            }
         else:
             if current:
                 current['page_indices'].append(info['page_idx'])
+                # 서브페이지에만 쉽먼트번호가 있는 경우 대비 — 첫 번째 발견 값 유지
+                if not current.get('shipment_id') and info.get('shipment_id'):
+                    current['shipment_id'] = info['shipment_id']
     if current:
         groups.append(current)
     return groups
