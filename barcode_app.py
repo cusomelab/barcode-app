@@ -3639,12 +3639,12 @@ with tab8:
         with sac0a:
             capacity = st.number_input(
                 '창고 수용력',
-                min_value=1, max_value=20, value=3,
+                min_value=1, max_value=10, value=1,
                 key='sort_capacity',
-                help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수',
+                help='창고에 동시에 펼쳐놓을 수 있는 배대지 박스 개수 (1 = 한 박스씩 차례대로)',
             )
 
-        # 집합 커버 추천: 미완료 박스 중 수량 많은 배대지 박스부터 + 송장 완성 많이 되는 것 우선
+        # 집합 커버 추천: 수량 절대 우선 (수량 많은 박스부터 → 빠르게 출고박스 채움)
         def _recommend_box_set(target_count, already_committed=None):
             committed = set(already_committed or [])
             picks = []
@@ -3654,11 +3654,11 @@ with tab8:
                 best = None
                 best_score = (-1, -1)
                 for box in available:
-                    trial = committed | set(picks) | {box}
-                    completed = sum(1 for need in ship_need_boxes.values() if need.issubset(trial))
                     qty = box_qty_map[box]['total_qty']
-                    # 점수: (완성되는 송장 수, 수량) — 사용자 요청: 수량 많은 걸로
-                    score = (qty, completed)
+                    ship_cnt = len(box_qty_map[box]['ships'])
+                    # 점수: (수량, -송장수) — 수량 우선 + 동률이면 송장 적은 것(단순한 박스)
+                    # 송장 적을수록 다른 배대지 박스 의존성↓ → 다른 박스 동시에 안 깔아도 됨
+                    score = (qty, -ship_cnt)
                     if score > best_score:
                         best_score = score
                         best = box
@@ -3669,7 +3669,8 @@ with tab8:
             return picks
 
         rec_set = _recommend_box_set(int(capacity))
-        if rec_set:
+        if rec_set and int(capacity) > 1:
+            # 수용력이 2 이상일 때만 세트 안내 (1이면 위의 1순위 추천과 동일하므로 중복 표시 안 함)
             rec_set_sorted = sorted(rec_set, key=_box_sort_key)
             completed_with_set = sum(
                 1 for need in ship_need_boxes.values() if need.issubset(set(rec_set))
@@ -3680,6 +3681,9 @@ with tab8:
                     f'**{", ".join(str(b) + "번" for b in rec_set_sorted)}**  '
                     f'→ 이것만 열면 **{completed_with_set}개 송장** 완성'
                 )
+        elif int(capacity) == 1:
+            with sac0b:
+                st.caption('💡 **1박스씩 처리** — 수량 많은 박스부터 차례로 끝내면 출고박스가 빠르게 채워져요. 동시 작업 원하면 수용력↑')
 
         # ── 활성 박스 (멀티 선택) ──
         if 'sort_active_boxes' not in st.session_state:
@@ -4355,7 +4359,7 @@ with tab8:
                             f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
                             f'<div style="font-size:2.5rem;font-weight:bold;">🎉 {box_num_str}번 {size_str} 완료!</div>'
                             f'<div style="font-size:1.3rem;margin-top:0.8rem;">📦 포장하고 출고지시서 종이를 끼워주세요</div>'
-                            f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;">마지막 상품: {r["상품명"][:35]}</div>'
+                            f'<div style="font-size:1rem;margin-top:0.5rem;opacity:0.9;word-break:break-all;">마지막 상품: {r["상품명"]}</div>'
                             f'</div>',
                             unsafe_allow_html=True)
                         speak = f'{kor_n}번 완료. 포장하세요'
@@ -4365,7 +4369,7 @@ with tab8:
                         qty_str = f' × {processed_qty}개' if processed_qty > 1 else ''
                         over_str = f' ⚠️ {over_qty}개 초과' if over_qty > 0 else ''
                         st.markdown(
-                            f'<div class="scan-ok"><strong style="font-size:1.5rem;">✅ {box_num_str}번{size_str}{qty_str} → {r["상품명"][:30]}</strong><br>'
+                            f'<div class="scan-ok" style="word-break:break-all;"><strong style="font-size:1.5rem;">✅ {box_num_str}번{size_str}{qty_str} → {r["상품명"]}</strong><br>'
                             f'송장 {r["ship"][-6:]} | 남은 수량: {r["remaining"]}개{over_str}</div>',
                             unsafe_allow_html=True)
                         if processed_qty > 1:
