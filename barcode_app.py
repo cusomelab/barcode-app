@@ -355,6 +355,18 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     # 호출 시 box_number 인자로 전달된 값을 사용 (자동 부여된 송장별 박스번호)
     # 송장 전체가 국내재고인 경우 box_number=None이 전달되어 표시되지 않음
     # 배대지 박스별 수량 요약도 함께 표시 (예: "58번 M2(10),W11(93)")
+    def _extract_box_key(bn_raw):
+        """boxNumber 값에서 배대지 박스 키(M2, W11 등)만 추출.
+        국내재고/부족/RAW 등은 제외, 알파벳+숫자 형식만 유효."""
+        import re as _re_ek
+        s = str(bn_raw or '').strip().upper()
+        if not s or s == 'NAN':
+            return ''
+        if any(kw in s for kw in ('국내', '부족', '재고', 'RAW')):
+            return ''
+        m = _re_ek.match(r'^([A-Z]*\d+)$', s)
+        return m.group(1) if m else ''
+
     dapae_summary_str = ''
     if box_number:
         from collections import Counter as _Counter
