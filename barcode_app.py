@@ -3128,44 +3128,45 @@ with tab8:
             # ── 송장번호 선택 ──
             st.markdown('<div class="shipment-input">', unsafe_allow_html=True)
             st.markdown("### 📋 쉽먼트 선택")
-            st.caption("바코드로 스캔하면 자동으로 피킹이 시작됩니다. 여러 개면 쉼표/줄바꿈으로 구분 후 🚀 피킹 시작 클릭.")
+            st.caption("송장번호 입력(또는 바코드 스캔) 후 Enter → 자동으로 피킹 시작. 여러 개면 쉼표로 구분 후 🚀 피킹 시작 클릭.")
 
             pick_df = st.session_state.pick_df_출고
 
-            # ── 🔫 바코드 스캐너 입력 (스캔 후 자동 시작) ──
-            if 'pick_ship_scan_counter' not in st.session_state:
-                st.session_state.pick_ship_scan_counter = 0
-            scan_ship_key = f"pick_ship_scan_{st.session_state.pick_ship_scan_counter}"
-            scan_ship_value = st.text_input(
-                "🔫 쉽먼트 바코드 스캔 (1개 — 자동 시작)",
-                key=scan_ship_key,
-                placeholder="스캐너로 송장 바코드를 찍으면 바로 피킹이 시작됩니다",
-            )
-            if scan_ship_value and scan_ship_value.strip():
-                _stgt = scan_ship_value.strip()
-                _valid_ids = list(pick_df["쉽먼트운송장번호"].unique())
-                _resolved = None
-                if _stgt in _valid_ids:
-                    _resolved = _stgt
-                else:
-                    _mm = [s for s in _valid_ids if s.endswith(_stgt)]
-                    if len(_mm) == 1:
-                        _resolved = _mm[0]
-                if _resolved:
-                    pick_init_picking([_resolved])
-                    st.session_state.pick_start_audio_pending = True
-                    st.session_state.pick_ship_scan_counter += 1
-                    st.rerun()
-                else:
-                    st.error(f"'{_stgt}'에 해당하는 쉽먼트를 찾을 수 없습니다.")
-                    st.session_state.pick_ship_scan_counter += 1
+            # 스캔 후 입력창 초기화용 카운터
+            if 'pick_ship_input_counter' not in st.session_state:
+                st.session_state.pick_ship_input_counter = 0
 
             p_col1, p_col2 = st.columns([2, 1])
             with p_col1:
-                input_shipment = st.text_area("송장번호 직접 입력 (1개 또는 여러 개)", placeholder="예: 461938764685, 461938764686\n또는 한 줄에 하나씩", key="pick_shipment_input", height=80)
+                _ship_input_key = f"pick_shipment_input_{st.session_state.pick_ship_input_counter}"
+                input_shipment = st.text_input(
+                    "송장번호 입력 (Enter로 자동 시작)",
+                    placeholder="예: 461938764685 (스캐너로 스캔 후 Enter 또는 자동 입력)",
+                    key=_ship_input_key,
+                )
             with p_col2:
                 centers = ["전체"] + sorted(pick_df["물류센터(FC)"].unique().tolist()) if "물류센터(FC)" in pick_df.columns else ["전체"]
                 center = st.selectbox("물류센터", centers, key="pick_center_filter")
+
+            # ── 자동 시작 로직 (단일 유효 송장 입력 시) ──
+            if input_shipment and input_shipment.strip():
+                # 쉼표/줄바꿈/공백으로 토큰 분리
+                _toks = [t.strip() for t in re.split(r'[,\s\n]+', input_shipment.strip()) if t.strip()]
+                if len(_toks) == 1:
+                    _stgt = _toks[0]
+                    _valid_ids = list(pick_df["쉽먼트운송장번호"].unique())
+                    _resolved = None
+                    if _stgt in _valid_ids:
+                        _resolved = _stgt
+                    else:
+                        _mm = [s for s in _valid_ids if s.endswith(_stgt)]
+                        if len(_mm) == 1:
+                            _resolved = _mm[0]
+                    if _resolved:
+                        pick_init_picking([_resolved])
+                        st.session_state.pick_start_audio_pending = True
+                        st.session_state.pick_ship_input_counter += 1
+                        st.rerun()
 
             pick_df = st.session_state.pick_df_출고
             if center != "전체" and "물류센터(FC)" in pick_df.columns:
