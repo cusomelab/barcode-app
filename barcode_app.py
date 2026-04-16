@@ -3198,7 +3198,6 @@ with tab8:
             st.markdown('</div>', unsafe_allow_html=True)
         else:
             # ── 피킹 진행 화면 ──
-            progress = pick_get_progress()
             shipment_id = st.session_state.pick_selected_shipment
 
             hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
@@ -3227,11 +3226,6 @@ with tab8:
                     # 다량 모드 상태 초기화
                     st.session_state.pick_next_qty = 1
                     st.session_state.pick_qty_input_mode = False
-                    # 입력/선택 위젯 상태 초기화 (이전 선택이 끌려오지 않도록)
-                    for k in ('pick_shipment_input', 'pick_add_shipment_input',
-                              'pick_shipment_select', 'pick_center_filter'):
-                        if k in st.session_state:
-                            del st.session_state[k]
                     st.rerun()
 
             # 쉽먼트 추가 입력 영역
