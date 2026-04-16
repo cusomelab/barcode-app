@@ -3128,13 +3128,42 @@ with tab8:
             # ── 송장번호 선택 ──
             st.markdown('<div class="shipment-input">', unsafe_allow_html=True)
             st.markdown("### 📋 쉽먼트 선택")
-            st.caption("여러 송장을 한 번에 처리하려면 쉼표(,) 또는 줄바꿈으로 구분하세요. 1번박스, 2번박스로 자동 안내됩니다.")
+            st.caption("바코드로 스캔하면 자동으로 피킹이 시작됩니다. 여러 개면 쉼표/줄바꿈으로 구분 후 🚀 피킹 시작 클릭.")
+
+            pick_df = st.session_state.pick_df_출고
+
+            # ── 🔫 바코드 스캐너 입력 (스캔 후 자동 시작) ──
+            if 'pick_ship_scan_counter' not in st.session_state:
+                st.session_state.pick_ship_scan_counter = 0
+            scan_ship_key = f"pick_ship_scan_{st.session_state.pick_ship_scan_counter}"
+            scan_ship_value = st.text_input(
+                "🔫 쉽먼트 바코드 스캔 (1개 — 자동 시작)",
+                key=scan_ship_key,
+                placeholder="스캐너로 송장 바코드를 찍으면 바로 피킹이 시작됩니다",
+            )
+            if scan_ship_value and scan_ship_value.strip():
+                _stgt = scan_ship_value.strip()
+                _valid_ids = list(pick_df["쉽먼트운송장번호"].unique())
+                _resolved = None
+                if _stgt in _valid_ids:
+                    _resolved = _stgt
+                else:
+                    _mm = [s for s in _valid_ids if s.endswith(_stgt)]
+                    if len(_mm) == 1:
+                        _resolved = _mm[0]
+                if _resolved:
+                    pick_init_picking([_resolved])
+                    st.session_state.pick_start_audio_pending = True
+                    st.session_state.pick_ship_scan_counter += 1
+                    st.rerun()
+                else:
+                    st.error(f"'{_stgt}'에 해당하는 쉽먼트를 찾을 수 없습니다.")
+                    st.session_state.pick_ship_scan_counter += 1
 
             p_col1, p_col2 = st.columns([2, 1])
             with p_col1:
                 input_shipment = st.text_area("송장번호 직접 입력 (1개 또는 여러 개)", placeholder="예: 461938764685, 461938764686\n또는 한 줄에 하나씩", key="pick_shipment_input", height=80)
             with p_col2:
-                pick_df = st.session_state.pick_df_출고
                 centers = ["전체"] + sorted(pick_df["물류센터(FC)"].unique().tolist()) if "물류센터(FC)" in pick_df.columns else ["전체"]
                 center = st.selectbox("물류센터", centers, key="pick_center_filter")
 
@@ -3199,6 +3228,26 @@ with tab8:
         else:
             # ── 피킹 진행 화면 ──
             shipment_id = st.session_state.pick_selected_shipment
+
+            # 신규 진입 시 "확인을 시작하세요" 음성 안내 (1회)
+            if st.session_state.get('pick_start_audio_pending'):
+                from streamlit.components.v1 import html as _st_start_html
+                _st_start_html("""<script>
+                try{
+                    window.speechSynthesis.cancel();
+                    setTimeout(function(){
+                        var u = new SpeechSynthesisUtterance('확인을 시작하세요');
+                        u.lang = 'ko-KR';
+                        u.rate = 1.15;
+                        u.volume = 1.0;
+                        var voices = window.speechSynthesis.getVoices();
+                        var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                        if (koVoice) u.voice = koVoice;
+                        window.speechSynthesis.speak(u);
+                    }, 120);
+                }catch(e){}
+                </script>""", height=0)
+                st.session_state.pick_start_audio_pending = False
 
             hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
             with hcol1:
