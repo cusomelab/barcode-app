@@ -3567,7 +3567,7 @@ with tab8:
                     ship_box_str = ",".join(ship_boxes) if ship_boxes else ""
                     rows.append({
                         "상태": status_txt, "바코드": bc,
-                        "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
+                        "상품명": info["상품명"],
                         "쉽먼트박스": ship_box_str,
                         "필요": n, "스캔": s, "남은": max(0, n - s),
                         "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
