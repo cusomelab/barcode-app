@@ -3269,44 +3269,6 @@ with tab8:
                             st.session_state.pick_show_add_input = False
                             st.rerun()
 
-            pc1, pc2, pc3, pc4, pc5 = st.columns(5)
-            pc1.metric("스캔", f"{progress['scanned']}/{progress['total']}")
-            pc2.metric("SKU 완료", f"{progress['done_skus']}/{progress['skus']}")
-            pc3.metric("진행률", f"{progress['pct']:.0%}")
-            pc4.metric("초과 스캔", f"{progress['over']}건",
-                       delta=f"+{progress['over']}" if progress['over'] > 0 else None, delta_color="inverse")
-            pc5.metric("재고 부족", f"{progress['shortage']}건",
-                       delta=f"{progress['shortage']}" if progress['shortage'] > 0 else None, delta_color="inverse")
-            st.progress(progress["pct"])
-
-            if progress["is_complete"]:
-                st.markdown(
-                    f'<div class="scan-complete">'
-                    f'<strong style="font-size:1.4rem;">🎉 검증확인이 완료되었습니다. 출고하세요!</strong><br>'
-                    f'<span style="font-size:1.05rem;">쉽먼트 {shipment_id[-6:]} — {progress["total"]}개 전부 검증 완료</span>'
-                    f'</div>',
-                    unsafe_allow_html=True)
-                # 신규 완료 시 1회만 음성 안내
-                _newly_done = shipment_id not in st.session_state.pick_completed_shipments
-                st.session_state.pick_completed_shipments.add(shipment_id)
-                if _newly_done:
-                    from streamlit.components.v1 import html as _st_html_done
-                    _st_html_done("""<script>
-                    try{
-                        window.speechSynthesis.cancel();
-                        setTimeout(function(){
-                            var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
-                            u.lang = 'ko-KR';
-                            u.rate = 1.15;
-                            u.volume = 1.0;
-                            var voices = window.speechSynthesis.getVoices();
-                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                            if (koVoice) u.voice = koVoice;
-                            window.speechSynthesis.speak(u);
-                        }, 120);
-                    }catch(e){}
-                    </script>""", height=0)
-
             st.markdown("---")
 
             # ── 바코드 스캔 (fragment으로 감싸서 전체 앱 리런 없이 조각만 재실행) ──
@@ -3323,6 +3285,48 @@ with tab8:
 
             @_pick_use_fragment
             def _pick_scan_fragment():
+                # ── 진행률 (매 스캔마다 갱신되도록 fragment 안에서 계산) ──
+                _prog = pick_get_progress()
+                _sid = st.session_state.pick_selected_shipment or ''
+                pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+                pc1.metric("스캔", f"{_prog['scanned']}/{_prog['total']}")
+                pc2.metric("SKU 완료", f"{_prog['done_skus']}/{_prog['skus']}")
+                pc3.metric("진행률", f"{_prog['pct']:.0%}")
+                pc4.metric("초과 스캔", f"{_prog['over']}건",
+                           delta=f"+{_prog['over']}" if _prog['over'] > 0 else None, delta_color="inverse")
+                pc5.metric("재고 부족", f"{_prog['shortage']}건",
+                           delta=f"{_prog['shortage']}" if _prog['shortage'] > 0 else None, delta_color="inverse")
+                st.progress(_prog["pct"])
+
+                if _prog["is_complete"]:
+                    st.markdown(
+                        f'<div class="scan-complete">'
+                        f'<strong style="font-size:1.4rem;">🎉 검증확인이 완료되었습니다. 출고하세요!</strong><br>'
+                        f'<span style="font-size:1.05rem;">쉽먼트 {_sid[-6:]} — {_prog["total"]}개 전부 검증 완료</span>'
+                        f'</div>',
+                        unsafe_allow_html=True)
+                    _newly_done = _sid not in st.session_state.pick_completed_shipments
+                    st.session_state.pick_completed_shipments.add(_sid)
+                    if _newly_done:
+                        from streamlit.components.v1 import html as _st_html_done
+                        _st_html_done("""<script>
+                        try{
+                            window.speechSynthesis.cancel();
+                            setTimeout(function(){
+                                var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
+                                u.lang = 'ko-KR';
+                                u.rate = 1.15;
+                                u.volume = 1.0;
+                                var voices = window.speechSynthesis.getVoices();
+                                var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                                if (koVoice) u.voice = koVoice;
+                                window.speechSynthesis.speak(u);
+                            }, 120);
+                        }catch(e){}
+                        </script>""", height=0)
+
+                st.markdown("---")
+
                 # 다량 모드 상태 초기화
                 if 'pick_next_qty' not in st.session_state:
                     st.session_state.pick_next_qty = 1
