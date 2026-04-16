@@ -3389,26 +3389,45 @@ with tab8:
                         }
                         return null;
                     }
-                    function focusScan() {
+                    function isInteractingOther(e) {
+                        // 드래그 중(스크롤바/리사이즈 등)이거나 dataframe 내부면 포커스 복귀 스킵
+                        const t = e && e.target;
+                        if (!t) return false;
+                        if (t.closest && (
+                            t.closest('[data-testid="stDataFrame"]') ||
+                            t.closest('canvas') ||
+                            t.closest('.glideDataEditor') ||
+                            t.closest('[role="grid"]') ||
+                            t.closest('[data-testid="stExpander"]')
+                        )) return true;
+                        return false;
+                    }
+                    function focusScan(e) {
+                        if (e && isInteractingOther(e)) return;
                         const inp = findScanInput();
                         if (inp && doc.activeElement !== inp) {
-                            inp.focus();
+                            // preventScroll: 포커스 이동 시 브라우저 자동 스크롤 방지
+                            inp.focus({preventScroll: true});
                         }
                     }
                     // 즉시 포커스
                     focusScan();
-                    // 짧은 간격으로 반복 (0.3초)
+                    // 짧은 간격으로 반복 (0.5초) — 스크롤 조작 방해 최소화
                     if (window._scanFocusInterval) clearInterval(window._scanFocusInterval);
-                    window._scanFocusInterval = setInterval(focusScan, 300);
-                    // DOM 변경 감지 시에도 포커스
-                    if (window._scanObserver) window._scanObserver.disconnect();
-                    window._scanObserver = new MutationObserver(focusScan);
-                    window._scanObserver.observe(doc.body, {childList: true, subtree: true});
-                    // 다른 곳 클릭해도 입력창으로 복귀 (단, 버튼/링크 제외)
+                    window._scanFocusInterval = setInterval(function(){
+                        // 사용자가 다른 곳과 상호작용 중(selection, 드래그)이면 스킵
+                        const sel = doc.getSelection && doc.getSelection();
+                        if (sel && sel.toString().length > 0) return;
+                        focusScan();
+                    }, 500);
+                    // DOM 변경 감지는 제거 (dataframe 스크롤이 DOM 변경 유발 → 루프)
+                    if (window._scanObserver) { window._scanObserver.disconnect(); window._scanObserver = null; }
+                    // 다른 곳 클릭해도 입력창으로 복귀 (버튼/링크/테이블/expander 제외)
                     doc.addEventListener('click', function(e){
                         const tag = (e.target.tagName||'').toLowerCase();
                         if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') return;
-                        setTimeout(focusScan, 50);
+                        if (isInteractingOther(e)) return;
+                        setTimeout(function(){ focusScan(e); }, 50);
                     }, true);
                 })();
                 </script>""", height=0)
@@ -4436,7 +4455,7 @@ with tab8:
                     // 수량 입력창이 표시되어 있으면 우선 그 창으로 포커스
                     const qty = findQtyInput();
                     if (qty) {
-                        if (doc.activeElement !== qty) qty.focus();
+                        if (doc.activeElement !== qty) qty.focus({preventScroll: true});
                         return;
                     }
                     const inp = findScan();
@@ -4445,7 +4464,8 @@ with tab8:
                     if (isInteractingOther()) return;
                     // 팝오버/드롭다운이 열려있으면 포커스 안 함
                     if (doc.querySelector('[data-baseweb="popover"]')) return;
-                    inp.focus();
+                    // preventScroll: 포커스 이동 시 브라우저 자동 스크롤 방지
+                    inp.focus({preventScroll: true});
                 }
                 focusScan();
                 if (window._sortFocusInterval) clearInterval(window._sortFocusInterval);
