@@ -3483,52 +3483,53 @@ with tab8:
                     }}catch(e){{}}
                     </script>""", height=0)
 
+                # ── 피킹 현황 (매 스캔마다 갱신되도록 fragment 안에서 렌더링) ──
+                st.markdown("---")
+                st.subheader("📋 피킹 현황")
+                rows = []
+                for bc, info in st.session_state.pick_picking_state.items():
+                    s, n = info["스캔수량"], info["필요수량"]
+                    if s > n: status_txt = f"⚠️ 초과 ({s}/{n})"
+                    elif s >= n: status_txt = "✅ 완료"
+                    elif s > 0: status_txt = f"🔄 {s}/{n}"
+                    else: status_txt = "⬜ 대기"
+                    inv = info.get("배대지잔여")
+                    ship_boxes = info.get("쉽먼트박스목록", [])
+                    ship_box_str = ",".join(ship_boxes) if ship_boxes else ""
+                    rows.append({
+                        "상태": status_txt, "바코드": bc,
+                        "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
+                        "쉽먼트박스": ship_box_str,
+                        "필요": n, "스캔": s, "남은": max(0, n - s),
+                        "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
+                        "배대지재고": f"{inv}" if inv is not None else "-",
+                    })
+                pick_order = {"🔄":0,"⬜":1,"✅":2,"⚠️":3}
+                rows.sort(key=lambda x: pick_order.get(x["상태"][0], 9))
+                st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True,
+                             height=min(500, len(rows) * 38 + 40))
+
+                shortage = st.session_state.get("pick_shortage_items", [])
+                if shortage:
+                    with st.expander(f"⛔ 부족분 — 피킹 불가 ({len(shortage)}건)", expanded=False):
+                        st.caption("출고지시서에 '부족'으로 표시된 항목입니다.")
+                        st.dataframe(_pd.DataFrame(shortage), use_container_width=True, hide_index=True)
+
+                if st.session_state.pick_scan_log:
+                    with st.expander(f"📜 스캔 로그 ({len(st.session_state.pick_scan_log)}건)"):
+                        log_display = []
+                        for entry in reversed(st.session_state.pick_scan_log[-50:]):
+                            icon = {"ok":"✅","over":"⚠️","error":"🚨","shortage":"📦"}.get(entry["status"],"?")
+                            log_display.append({"시간":entry["시간"],"결과":icon,"바코드":entry["barcode"],"내용":entry["message"]})
+                        st.dataframe(_pd.DataFrame(log_display), use_container_width=True, hide_index=True)
+
+                    st.download_button(
+                        "📥 스캔 로그 CSV",
+                        data=_pd.DataFrame(st.session_state.pick_scan_log).to_csv(index=False, encoding="utf-8-sig"),
+                        file_name=f"picking_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv", use_container_width=True, key="pick_log_dl")
+
             _pick_scan_fragment()
-
-            st.markdown("---")
-            st.subheader("📋 피킹 현황")
-            rows = []
-            for bc, info in st.session_state.pick_picking_state.items():
-                s, n = info["스캔수량"], info["필요수량"]
-                if s > n: status_txt = f"⚠️ 초과 ({s}/{n})"
-                elif s >= n: status_txt = "✅ 완료"
-                elif s > 0: status_txt = f"🔄 {s}/{n}"
-                else: status_txt = "⬜ 대기"
-                inv = info.get("배대지잔여")
-                ship_boxes = info.get("쉽먼트박스목록", [])
-                ship_box_str = ",".join(ship_boxes) if ship_boxes else ""
-                rows.append({
-                    "상태": status_txt, "바코드": bc,
-                    "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
-                    "쉽먼트박스": ship_box_str,
-                    "필요": n, "스캔": s, "남은": max(0, n - s),
-                    "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
-                    "배대지재고": f"{inv}" if inv is not None else "-",
-                })
-            pick_order = {"🔄":0,"⬜":1,"✅":2,"⚠️":3}
-            rows.sort(key=lambda x: pick_order.get(x["상태"][0], 9))
-            st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True,
-                         height=min(500, len(rows) * 38 + 40))
-
-            shortage = st.session_state.get("pick_shortage_items", [])
-            if shortage:
-                with st.expander(f"⛔ 부족분 — 피킹 불가 ({len(shortage)}건)", expanded=False):
-                    st.caption("출고지시서에 '부족'으로 표시된 항목입니다.")
-                    st.dataframe(_pd.DataFrame(shortage), use_container_width=True, hide_index=True)
-
-            if st.session_state.pick_scan_log:
-                with st.expander(f"📜 스캔 로그 ({len(st.session_state.pick_scan_log)}건)"):
-                    log_display = []
-                    for entry in reversed(st.session_state.pick_scan_log[-50:]):
-                        icon = {"ok":"✅","over":"⚠️","error":"🚨","shortage":"📦"}.get(entry["status"],"?")
-                        log_display.append({"시간":entry["시간"],"결과":icon,"바코드":entry["barcode"],"내용":entry["message"]})
-                    st.dataframe(_pd.DataFrame(log_display), use_container_width=True, hide_index=True)
-
-                st.download_button(
-                    "📥 스캔 로그 CSV",
-                    data=_pd.DataFrame(st.session_state.pick_scan_log).to_csv(index=False, encoding="utf-8-sig"),
-                    file_name=f"picking_log_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv", use_container_width=True, key="pick_log_dl")
 
     elif work_mode == "📥 입고 분류":
         import pandas as _pd2
