@@ -1068,39 +1068,46 @@ def pick_update_check_qty(client, sheet_url, tab_name, barcode, ship_num, scanne
         return False
 
 
+_SHEET_SHIP_COL_IDX = 8   # I열 (송장번호), 0-based
+_SHEET_QTY_COL_IDX = 11   # L열 (확인수량), 0-based → update_cell에는 +1=12
+_SHEET_BOX_COL_IDX = 12   # M열 (출고박스번호), 0-based → update_cell에는 +1=13
+_SHEET_BOX_COL_LETTER = 'M'
+
+
 def pick_read_box_numbers(client, sheet_url, tab_name):
-    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열, 13번째) 매핑을 읽음.
+    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열) 매핑을 읽음.
     M열이 비어있거나 숫자가 아닌 행은 제외.
-    반환: {송장번호: 박스번호(int)}
+    반환: {송장번호: 박스번호(int)} (성공, 빈 dict 포함 가능)
+         / None (API 호출 실패 — 읽기 자체가 안 됨)
     """
     try:
         sheet_id = _extract_sheet_id(sheet_url)
         spreadsheet = client.open_by_key(sheet_id)
         ws = spreadsheet.worksheet(tab_name)
         all_values = ws.get_all_values()
-        if len(all_values) < 2:
-            return {}
-        mapping = {}
-        for row in all_values[1:]:
-            ship = str(row[8]).strip() if len(row) > 8 else ''
-            box = str(row[12]).strip() if len(row) > 12 else ''
-            if not ship or not box:
-                continue
-            try:
-                n = int(box)
-                if n > 0:
-                    mapping[ship] = n
-            except ValueError:
-                continue
-        return mapping
     except Exception:
+        return None
+    if len(all_values) < 2:
         return {}
+    mapping = {}
+    for row in all_values[1:]:
+        ship = str(row[_SHEET_SHIP_COL_IDX]).strip() if len(row) > _SHEET_SHIP_COL_IDX else ''
+        box = str(row[_SHEET_BOX_COL_IDX]).strip() if len(row) > _SHEET_BOX_COL_IDX else ''
+        if not ship or not box:
+            continue
+        try:
+            n = int(box)
+            if n > 0:
+                mapping[ship] = n
+        except ValueError:
+            continue
+    return mapping
 
 
 def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=True):
-    """출고확인 시트 M열(13번째)에 송장별 박스번호 기록 (batch).
+    """출고확인 시트 M열에 송장별 박스번호 기록 (batch).
     only_empty=True이면 M열이 비어있는 행만 쓰기(기존 값 보존).
-    반환: 기록된 셀 수
+    반환: 기록된 셀 수 / -1 (API 실패 시)
     """
     if not ship_to_box:
         return 0
@@ -1114,21 +1121,21 @@ def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=
         updates = []
         for row_idx in range(1, len(all_values)):
             row = all_values[row_idx]
-            ship = str(row[8]).strip() if len(row) > 8 else ''
+            ship = str(row[_SHEET_SHIP_COL_IDX]).strip() if len(row) > _SHEET_SHIP_COL_IDX else ''
             if not ship or ship not in ship_to_box:
                 continue
-            current_m = str(row[12]).strip() if len(row) > 12 else ''
+            current_m = str(row[_SHEET_BOX_COL_IDX]).strip() if len(row) > _SHEET_BOX_COL_IDX else ''
             if only_empty and current_m:
                 continue
             updates.append({
-                'range': f'M{row_idx + 1}',
+                'range': f'{_SHEET_BOX_COL_LETTER}{row_idx + 1}',
                 'values': [[str(ship_to_box[ship])]],
             })
         if updates:
             ws.batch_update(updates)
         return len(updates)
     except Exception:
-        return 0
+        return -1
 
 
 def pick_parse_box(box_str):
@@ -2973,15 +2980,15 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
 
     # 신규 부여된 박스번호를 시트 M열에 기록
     new_box_only = {}
+    sheet_write_result = None  # None: 시도 안 함 / >=0: 기록된 셀 수 / -1: API 실패
     if existing_box_map is not None:
         new_box_only = {s: n for s, n in rp_ship_to_box_num.items()
                         if s not in existing_box_map}
         if write_new_to_sheet and new_box_only and sheet_client and sheet_url and sheet_tab:
-            try:
-                pick_write_box_numbers(sheet_client, sheet_url, sheet_tab,
-                                       new_box_only, only_empty=True)
-            except Exception:
-                pass
+            sheet_write_result = pick_write_box_numbers(
+                sheet_client, sheet_url, sheet_tab,
+                new_box_only, only_empty=True,
+            )
 
     rp_so_by_invoice = {}
     for inv_num in sorted(matched):
@@ -3076,6 +3083,7 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
         'not_in_csv': sorted(not_in_csv),
         'ship_to_box_num': rp_ship_to_box_num,
         'new_box_only': new_box_only,
+        'sheet_write_result': sheet_write_result,
         'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
     }
 
@@ -3158,16 +3166,20 @@ with tab7:
                         else:
                             rp_items = _parse_csv_bytes(file_bytes)
 
-                    # 시트 모드면 M열(기존값) 읽어 보존
+                    # 시트 모드면 M열(기존값) 읽어 보존. 읽기 실패 시 경고 후 중단.
                     _existing_map = None
                     if _use_sheet_source:
                         _existing_map = dict(st.session_state.get('pick_ship_to_box') or {})
                         if not _existing_map and st.session_state.get('pick_gsheet_client'):
-                            _existing_map = pick_read_box_numbers(
+                            _read = pick_read_box_numbers(
                                 st.session_state.pick_gsheet_client,
                                 st.session_state.get('pick_sheet_url_출고', ''),
                                 st.session_state.get('pick_sheet_tab_출고', ''),
                             )
+                            if _read is None:
+                                st.error('❌ 시트 M열 읽기 실패. 새로고침 후 다시 시도하세요.')
+                                st.stop()
+                            _existing_map = _read
 
                     result = _run_reprint_pipeline(
                         rp_items, rp_manifest_files, rp_label_files,
@@ -3187,6 +3199,8 @@ with tab7:
                     # 시트 세션 캐시 업데이트
                     if _use_sheet_source and result.get('ship_to_box_num'):
                         st.session_state['pick_ship_to_box'] = result['ship_to_box_num']
+                    if result.get('sheet_write_result') == -1:
+                        st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다. 다시 시도하세요.')
 
                     col_m1, col_m2, col_m3 = st.columns(3)
                     with col_m1:
@@ -3410,11 +3424,15 @@ with tab8:
                     if (not _pk_existing
                             and st.session_state.get('pick_gsheet_client')
                             and st.session_state.get('pick_sheet_url_출고')):
-                        _pk_existing = pick_read_box_numbers(
+                        _pk_read = pick_read_box_numbers(
                             st.session_state.pick_gsheet_client,
                             st.session_state.pick_sheet_url_출고,
                             st.session_state.pick_sheet_tab_출고,
                         )
+                        if _pk_read is None:
+                            st.error('❌ 시트 M열 읽기 실패. 새로고침 후 다시 시도하세요.')
+                            st.stop()
+                        _pk_existing = _pk_read
 
                     _pk_result = _run_reprint_pipeline(
                         _pk_items, pk_manifest_files, pk_label_files,
@@ -3432,6 +3450,8 @@ with tab8:
                     else:
                         if _pk_result.get('ship_to_box_num'):
                             st.session_state['pick_ship_to_box'] = _pk_result['ship_to_box_num']
+                        if _pk_result.get('sheet_write_result') == -1:
+                            st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다.')
                         _n_new = len(_pk_result.get('new_box_only') or {})
                         _n_reuse = _pk_result['matched'] - _n_new
                         st.success(
@@ -4012,30 +4032,36 @@ with tab8:
             })
 
         # 1) 시트 M열에서 기존 박스번호 읽기 (gsheet 모드 + 세션 캐시)
+        #    실패(None) 시 캐시 저장 안 함 → 다음 rerun에서 재시도
         _pick_url = st.session_state.get('pick_sheet_url_출고', '')
         _pick_tab = st.session_state.get('pick_sheet_tab_출고', '')
         _existing_box_map = {}
-        if (st.session_state.get('pick_use_gsheet')
-                and st.session_state.get('pick_gsheet_client')
-                and _pick_url and _pick_tab):
+        _read_failed = False
+        _gsheet_ready = (st.session_state.get('pick_use_gsheet')
+                         and st.session_state.get('pick_gsheet_client')
+                         and _pick_url and _pick_tab)
+        if _gsheet_ready:
             _cache_key = f"_pick_existing_box_{_pick_url}_{_pick_tab}"
             if _cache_key in st.session_state:
                 _existing_box_map = st.session_state[_cache_key]
             else:
-                _existing_box_map = pick_read_box_numbers(
+                _read = pick_read_box_numbers(
                     st.session_state.pick_gsheet_client, _pick_url, _pick_tab
                 )
-                st.session_state[_cache_key] = _existing_box_map
+                if _read is None:
+                    _read_failed = True
+                    st.warning('⚠️ 시트 M열 읽기 실패 — 이번 세션에서 박스번호 쓰기는 건너뜁니다. 페이지를 새로고침하세요.')
+                else:
+                    _existing_box_map = _read
+                    st.session_state[_cache_key] = _read
 
         # 2) 기존 유지 + 신규 송장만 순차 부여
         sort_ship_to_box = assign_box_numbers_with_existing(
             sort_items_for_box, _existing_box_map
         )
 
-        # 3) 신규 부여된 것만 시트 M열에 기록 (백그라운드, 기존값 보존)
-        if (st.session_state.get('pick_use_gsheet')
-                and st.session_state.get('pick_gsheet_client')
-                and _pick_url and _pick_tab):
+        # 3) 신규 부여된 것만 시트 M열에 동기 기록 (기존값 보존, 실패 시 캐시 갱신 안 함)
+        if _gsheet_ready and not _read_failed:
             _new_only = {s: n for s, n in sort_ship_to_box.items()
                          if s not in _existing_box_map}
             _written_key = f"_pick_box_written_{_pick_url}_{_pick_tab}"
@@ -4043,22 +4069,20 @@ with tab8:
             _to_write = {s: n for s, n in _new_only.items()
                          if _last_written.get(s) != n}
             if _to_write:
-                import threading
-                _client = st.session_state.pick_gsheet_client
-                _updates_new = dict(_to_write)
-                def _bg_write_box():
-                    try:
-                        pick_write_box_numbers(_client, _pick_url, _pick_tab,
-                                               _updates_new, only_empty=True)
-                    except Exception:
-                        pass
-                threading.Thread(target=_bg_write_box, daemon=True).start()
-                # 세션 캐시 갱신 — 다음 rerun에서 중복 기록 방지
-                _merged = dict(_existing_box_map)
-                _merged.update(_new_only)
-                st.session_state[_cache_key] = _merged
-                _last_written.update(_to_write)
-                st.session_state[_written_key] = _last_written
+                with st.spinner(f'📝 시트 M열에 박스번호 {len(_to_write)}건 기록 중...'):
+                    _result = pick_write_box_numbers(
+                        st.session_state.pick_gsheet_client,
+                        _pick_url, _pick_tab, _to_write, only_empty=True,
+                    )
+                if _result >= 0:
+                    # 성공 시에만 캐시 갱신
+                    _merged = dict(_existing_box_map)
+                    _merged.update(_new_only)
+                    st.session_state[_cache_key] = _merged
+                    _last_written.update(_to_write)
+                    st.session_state[_written_key] = _last_written
+                else:
+                    st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다. 다음 rerun에서 재시도됩니다.')
 
         # 쉽먼트 재출력 탭에서 재사용하도록 세션에 저장
         st.session_state['pick_ship_to_box'] = sort_ship_to_box
