@@ -1096,10 +1096,11 @@ def pick_read_box_numbers(client, sheet_url, tab_name):
         if not ship or not box:
             continue
         try:
-            n = int(box)
+            # "36" / " 36 " / "36.0" (엑셀 float 표기) 모두 허용
+            n = int(float(box))
             if n > 0:
                 mapping[ship] = n
-        except ValueError:
+        except (ValueError, TypeError):
             continue
     return mapping
 
@@ -3122,6 +3123,7 @@ with tab7:
         rp_csv = None
         rp_manifest_files = []  # [(파일명, 파일)]
         rp_label_files = []     # [(파일명, 파일)]
+        rp_unknown_files = []   # 이름 패턴 불일치로 무시된 파일
 
         for f in reprint_files:
             fname = f.name.lower()
@@ -3131,6 +3133,14 @@ with tab7:
                 rp_manifest_files.append((f.name, f))
             elif 'label' in fname:
                 rp_label_files.append((f.name, f))
+            else:
+                rp_unknown_files.append(f.name)
+
+        if rp_unknown_files:
+            st.warning(
+                f'⚠️ 파일명에 `manifest`/`label`이 없어 무시된 파일 {len(rp_unknown_files)}개: '
+                + ', '.join(f'`{n}`' for n in rp_unknown_files)
+            )
 
         st.markdown(f'**분류 결과:**')
         if _use_sheet_source:
@@ -3392,7 +3402,7 @@ with tab8:
     # ── 출고지시서 재출력 (피킹 시작 전에 박스번호 부여 + M열 기록) ──
     st.divider()
     with st.expander("📄 출고지시서 재출력 (쉽먼트/라벨 PDF 업로드 → 박스번호 부여)", expanded=False):
-        st.caption("피킹 시작 전에 쉽먼트/라벨 PDF를 업로드하면, 현재 시트 송장과 매칭해 출고지시서 PDF를 만들고 박스번호를 시트 M열에 저장합니다. 기존에 M열에 값이 있으면 그대로 유지(발주 취소 내성).")
+        st.caption("피킹 시작 전에 쉽먼트/라벨 PDF를 업로드하면, 현재 시트 송장과 매칭해 출고지시서 PDF를 만들고 박스번호를 시트 M열에 저장합니다. 기존에 M열에 값이 있으면 그대로 유지(발주 취소 내성). ⚠️ 동일 시트를 여러 사용자가 동시에 재출력하지 마세요 — 박스번호 충돌 가능.")
 
         pick_reprint_files = st.file_uploader(
             '매니페스트/라벨 PDF (파일명에 manifest/label 포함)',
@@ -3404,12 +3414,21 @@ with tab8:
         if pick_reprint_files:
             pk_manifest_files = []
             pk_label_files = []
+            pk_unknown_files = []
             for f in pick_reprint_files:
                 fname = f.name.lower()
                 if 'manifest' in fname:
                     pk_manifest_files.append((f.name, f))
                 elif 'label' in fname:
                     pk_label_files.append((f.name, f))
+                else:
+                    pk_unknown_files.append(f.name)
+
+            if pk_unknown_files:
+                st.warning(
+                    f'⚠️ 파일명에 `manifest`/`label`이 없어 무시된 파일 {len(pk_unknown_files)}개: '
+                    + ', '.join(f'`{n}`' for n in pk_unknown_files)
+                )
 
             st.markdown(f'- 매니페스트 PDF: **{len(pk_manifest_files)}개** / 라벨 PDF: **{len(pk_label_files)}개**')
 
