@@ -650,6 +650,47 @@ def assign_box_numbers(items):
     return {s[2]: idx + 1 for idx, s in enumerate(sorted_ships)}
 
 
+def assign_box_numbers_with_existing(items, existing_box_map):
+    """기존 매핑(시트 M열)을 보존하고, 그 외 송장만 신규 번호 부여.
+    - existing_box_map에 있는 송장은 기존 번호 그대로 유지 (발주 취소돼도 고정)
+    - 신규 송장은 max(기존)+1 부터 (입고예정일>물류센터>송장번호) 순으로 부여
+    반환: {송장번호: 박스번호(int)}
+    """
+    result = {}
+    for s, v in (existing_box_map or {}).items():
+        s = str(s).strip()
+        try:
+            n = int(str(v).strip())
+            if s and n > 0:
+                result[s] = n
+        except (ValueError, TypeError):
+            continue
+    ship_info = {}
+    ship_valid = {}
+    for it in items or []:
+        ship = str(it.get('shipmentNumber', '') or '').strip()
+        if not ship or ship in result:
+            continue
+        bn_raw = str(it.get('boxNumber', '') or '').strip()
+        is_domestic = bool(bn_raw) and any(kw in bn_raw for kw in ('국내', '부족', '재고', 'RAW'))
+        has_valid_box = bool(bn_raw) and not is_domestic
+        if ship not in ship_info:
+            center = str(it.get('logisticsCenter', '') or '').strip()
+            edate = str(it.get('expectedDate', '') or '').strip()
+            ship_info[ship] = (edate, center, ship)
+            ship_valid[ship] = has_valid_box
+        else:
+            if has_valid_box:
+                ship_valid[ship] = True
+    valid_new = {s: info for s, info in ship_info.items() if ship_valid.get(s, False)}
+    sorted_new = sorted(valid_new.values(), key=lambda x: (x[0], x[1], x[2]))
+    next_num = max(result.values(), default=0) + 1
+    for s in sorted_new:
+        result[s[2]] = next_num
+        next_num += 1
+    return result
+
+
 def create_shipment_barcodes_pdf(shipment_numbers):
     """송장번호 리스트 → 바코드 PDF (한 페이지에 여러 송장 배치)"""
     from reportlab.platypus import Image as RLImage
@@ -1027,6 +1068,69 @@ def pick_update_check_qty(client, sheet_url, tab_name, barcode, ship_num, scanne
         return False
 
 
+def pick_read_box_numbers(client, sheet_url, tab_name):
+    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열, 13번째) 매핑을 읽음.
+    M열이 비어있거나 숫자가 아닌 행은 제외.
+    반환: {송장번호: 박스번호(int)}
+    """
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return {}
+        mapping = {}
+        for row in all_values[1:]:
+            ship = str(row[8]).strip() if len(row) > 8 else ''
+            box = str(row[12]).strip() if len(row) > 12 else ''
+            if not ship or not box:
+                continue
+            try:
+                n = int(box)
+                if n > 0:
+                    mapping[ship] = n
+            except ValueError:
+                continue
+        return mapping
+    except Exception:
+        return {}
+
+
+def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=True):
+    """출고확인 시트 M열(13번째)에 송장별 박스번호 기록 (batch).
+    only_empty=True이면 M열이 비어있는 행만 쓰기(기존 값 보존).
+    반환: 기록된 셀 수
+    """
+    if not ship_to_box:
+        return 0
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+        updates = []
+        for row_idx in range(1, len(all_values)):
+            row = all_values[row_idx]
+            ship = str(row[8]).strip() if len(row) > 8 else ''
+            if not ship or ship not in ship_to_box:
+                continue
+            current_m = str(row[12]).strip() if len(row) > 12 else ''
+            if only_empty and current_m:
+                continue
+            updates.append({
+                'range': f'M{row_idx + 1}',
+                'values': [[str(ship_to_box[ship])]],
+            })
+        if updates:
+            ws.batch_update(updates)
+        return len(updates)
+    except Exception:
+        return 0
+
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -1123,6 +1227,10 @@ def pick_load_all_data(url_출고, tab_출고, url_배대지="", tab_배대지="
     if client:
         st.session_state.pick_gsheet_client = client
         st.session_state.pick_use_gsheet = True
+        # 시트 재로드 시 M열 캐시 초기화 (발주 변동 반영)
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("_pick_existing_box_") or _k.startswith("_pick_box_written_"):
+                del st.session_state[_k]
         # 출고지시서(쉽먼트시트) 로드
         if url_출고 and tab_출고:
             df_출고 = pick_load_sheet_as_df(client, url_출고, tab_출고)
@@ -2743,18 +2851,261 @@ with tab6:
                     )
 
 # ── 쉽먼트 재출력 탭 ──────────────────────────────────────
+def _pick_df_to_items(df):
+    """피킹&분류 탭의 df_출고 → create_work_order_pdf 용 items 리스트 변환"""
+    items = []
+    for _, row in df.iterrows():
+        try:
+            qty = int(row.get('수량', 0) or 0)
+        except (ValueError, TypeError):
+            qty = 0
+        items.append({
+            'logisticsCenter': str(row.get('물류센터(FC)', '') or '').strip(),
+            'expectedDate': str(row.get('입고예정일(EDD)', '') or row.get('입고예정일', '') or '').strip(),
+            'productBarcode': str(row.get('바코드', '') or '').strip(),
+            'productName': str(row.get('상품명', '') or '').strip(),
+            'quantity': qty,
+            'shipmentNumber': str(row.get('쉽먼트운송장번호', '') or '').strip(),
+            'orderDate': str(row.get('발주일', '') or '').strip(),
+            'boxNumber': str(row.get('박스번호', '') or '').strip(),
+            'location': str(row.get('위치', '') or row.get('적재위치', '') or '').strip(),
+        })
+    return items
+
+
+def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
+                          existing_box_map=None, write_new_to_sheet=False,
+                          sheet_client=None, sheet_url=None, sheet_tab=None,
+                          on_progress=None, on_status=None):
+    """재출력 공통 처리: 매니페스트/라벨 PDF 파싱 → 송장 매칭 → 박스번호 부여
+    → 출고지시서 PDF 생성 → 통합 PDF 병합.
+
+    existing_box_map: 기존 {송장: 박스번호}. None이면 fresh 부여(assign_box_numbers).
+        dict면 assign_box_numbers_with_existing로 기존값 보존.
+    write_new_to_sheet: True면 신규 부여분을 시트 M열에 기록 (기존값 보존).
+    on_progress: 0~1 float 콜백 (진행률 UI용)
+    on_status: str 콜백 (상태 메시지용)
+
+    반환: 성공시 dict, 실패시 {'error': str}
+    """
+    def _p(v):
+        if on_progress:
+            try:
+                on_progress(v)
+            except Exception:
+                pass
+
+    def _s(msg):
+        if on_status:
+            try:
+                on_status(msg)
+            except Exception:
+                pass
+
+    _s('📄 데이터 분석 중...')
+    if not rp_items:
+        return {'error': '데이터에서 항목을 찾을 수 없습니다.'}
+
+    csv_invoices = set()
+    rp_grouped = OrderedDict()
+    for item in rp_items:
+        inv = item.get('shipmentNumber', '')
+        if inv:
+            csv_invoices.add(inv)
+            rp_grouped.setdefault(inv, []).append(item)
+    for key in rp_grouped:
+        rp_grouped[key].sort(key=lambda x: (
+            [int(c) if c.isdigit() else c.lower()
+             for c in re.split(r'(\d+)', x.get('boxNumber', ''))],
+            x.get('productName', '')
+        ))
+    _p(0.2)
+
+    _s('📊 매니페스트/라벨 분석 중...')
+    rp_manifest_data = []
+    for fname, mf in rp_manifest_files:
+        m_bytes = mf.read(); mf.seek(0)
+        m_info = _extract_manifest_info(m_bytes)
+        m_groups = _group_manifest_pages(m_info)
+        sorted_m = sorted(m_groups, key=lambda g: g['invoice_number'] or '')
+        rp_manifest_data.append((m_bytes, sorted_m))
+    rp_label_data = []
+    for fname, lf in rp_label_files:
+        l_bytes = lf.read(); lf.seek(0)
+        l_info = _extract_label_info(l_bytes)
+        l_groups = _group_label_pages(l_info)
+        sorted_l = sorted(l_groups, key=lambda g: g['invoice_number'] or '')
+        rp_label_data.append((l_bytes, sorted_l))
+    _p(0.4)
+
+    all_manifest_invoices = set()
+    invoice_to_shipment_id = {}
+    for _, sorted_m in rp_manifest_data:
+        for g in sorted_m:
+            if g['invoice_number']:
+                all_manifest_invoices.add(g['invoice_number'])
+                if g.get('shipment_id'):
+                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
+    all_label_invoices = set()
+    for _, sorted_l in rp_label_data:
+        for g in sorted_l:
+            if g['invoice_number']:
+                all_label_invoices.add(g['invoice_number'])
+                if g.get('shipment_id'):
+                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
+
+    all_pdf_invoices = all_manifest_invoices | all_label_invoices
+    matched = csv_invoices & all_pdf_invoices
+    not_in_manifest = csv_invoices - all_pdf_invoices
+    not_in_csv = all_pdf_invoices - csv_invoices
+
+    if not matched:
+        return {'error': '데이터와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.'}
+
+    _s('📄 출고지시서 생성 중...')
+    rp_all_items = []
+    for inv_num in sorted(matched):
+        rp_all_items.extend(rp_grouped[inv_num])
+    if existing_box_map is not None:
+        rp_ship_to_box_num = assign_box_numbers_with_existing(rp_all_items, existing_box_map)
+    else:
+        rp_ship_to_box_num = assign_box_numbers(rp_all_items)
+
+    # 신규 부여된 박스번호를 시트 M열에 기록
+    new_box_only = {}
+    if existing_box_map is not None:
+        new_box_only = {s: n for s, n in rp_ship_to_box_num.items()
+                        if s not in existing_box_map}
+        if write_new_to_sheet and new_box_only and sheet_client and sheet_url and sheet_tab:
+            try:
+                pick_write_box_numbers(sheet_client, sheet_url, sheet_tab,
+                                       new_box_only, only_empty=True)
+            except Exception:
+                pass
+
+    rp_so_by_invoice = {}
+    for inv_num in sorted(matched):
+        inv_items = rp_grouped[inv_num]
+        auto_box_num = rp_ship_to_box_num.get(inv_num)
+        center = inv_items[0].get('logisticsCenter', '')
+        gk = f"{center}_{inv_num}" if center else inv_num
+        real_shipment_id = invoice_to_shipment_id.get(inv_num, inv_num)
+        pdf_buf = create_work_order_pdf(gk, inv_items, real_shipment_id, auto_box_num)
+        rp_so_by_invoice[inv_num] = pdf_buf
+    _p(0.6)
+
+    _s('📎 통합 PDF 생성 중...')
+    rp_final_writer = PdfWriter()
+    rp_shipment_only_writer = PdfWriter()
+    rp_so_only_writer = PdfWriter()
+    rp_total = rp_label_total = rp_shipment_total = rp_so_total = 0
+
+    manifest_pages_by_inv = {}
+    for m_bytes, sorted_m in rp_manifest_data:
+        for g in sorted_m:
+            inv = g['invoice_number']
+            if not inv or inv not in matched:
+                continue
+            manifest_pages_by_inv.setdefault(inv, []).append((m_bytes, g['page_indices']))
+
+    label_groups_by_inv = {}
+    for l_bytes, sorted_l in rp_label_data:
+        for g in sorted_l:
+            inv = g['invoice_number']
+            if not inv or inv not in matched:
+                continue
+            label_groups_by_inv.setdefault(inv, []).append((l_bytes, g))
+
+    for inv_num in sorted(matched):
+        if inv_num in rp_so_by_invoice:
+            so_buf = rp_so_by_invoice[inv_num]
+            so_buf.seek(0)
+            so_reader = PdfReader(so_buf)
+            for page in so_reader.pages:
+                rp_final_writer.add_page(page)
+                rp_so_only_writer.add_page(page)
+            rp_total += len(so_reader.pages)
+            rp_so_total += len(so_reader.pages)
+        for m_bytes, page_indices in manifest_pages_by_inv.get(inv_num, []):
+            m_reader = PdfReader(io.BytesIO(m_bytes))
+            for pidx in page_indices:
+                rp_final_writer.add_page(m_reader.pages[pidx])
+                rp_shipment_only_writer.add_page(m_reader.pages[pidx])
+                rp_total += 1
+                rp_shipment_total += 1
+        inv_label_list = label_groups_by_inv.get(inv_num, [])
+        if inv_label_list:
+            grouped_by_lbytes = {}
+            for l_bytes, grp in inv_label_list:
+                grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
+            for _, (l_bytes, groups) in grouped_by_lbytes.items():
+                four_up = _render_labels_4up(l_bytes, groups)
+                for img in four_up:
+                    img_buf = io.BytesIO()
+                    img.save(img_buf, format='PDF', resolution=300)
+                    img_buf.seek(0)
+                    lp = PdfReader(img_buf)
+                    rp_final_writer.add_page(lp.pages[0])
+                    rp_shipment_only_writer.add_page(lp.pages[0])
+                    rp_total += 1
+                    rp_label_total += 1
+                    rp_shipment_total += 1
+
+    _p(0.9)
+    rp_final_buf = io.BytesIO()
+    rp_final_writer.write(rp_final_buf)
+    rp_final_buf.seek(0)
+    rp_shipment_only_buf = io.BytesIO()
+    rp_shipment_only_writer.write(rp_shipment_only_buf)
+    rp_shipment_only_buf.seek(0)
+    rp_so_only_buf = io.BytesIO()
+    rp_so_only_writer.write(rp_so_only_buf)
+    rp_so_only_buf.seek(0)
+    _p(1.0)
+    _s('✅ 완료!')
+
+    return {
+        'final_bytes': rp_final_buf.getvalue(),
+        'shipment_only_bytes': rp_shipment_only_buf.getvalue(),
+        'so_only_bytes': rp_so_only_buf.getvalue(),
+        'total': rp_total,
+        'shipment_total': rp_shipment_total,
+        'so_total': rp_so_total,
+        'matched': len(matched),
+        'not_in_manifest': sorted(not_in_manifest),
+        'not_in_csv': sorted(not_in_csv),
+        'ship_to_box_num': rp_ship_to_box_num,
+        'new_box_only': new_box_only,
+        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+    }
+
+
 with tab7:
     st.header('🔄 쉽먼트 재출력')
-    st.caption('CSV(출고지시서)의 송장번호와 매니페스트/라벨의 송장번호를 매칭하여, CSV에 있는 송장만 골라 재출력합니다')
+    st.caption('피킹&분류에 로드된 시트 데이터(또는 CSV)의 송장번호와 매니페스트/라벨을 매칭하여 재출력합니다')
+
+    # ── 데이터 소스 모드 선택 ──
+    _has_sheet_data = st.session_state.get('pick_df_출고') is not None
+    _use_sheet_source = False
+    if _has_sheet_data:
+        _use_sheet_source = st.toggle(
+            '📋 피킹&분류 시트 데이터 사용 (박스번호는 시트 M열에서 보존)',
+            value=True,
+            key='reprint_use_sheet',
+            help='시트에 이미 박스번호가 저장되어 있어서 CSV 업로드 없이도 쉽먼트/라벨만 올리면 됩니다. 발주 취소돼도 박스번호 안 틀어짐.'
+        )
 
     st.divider()
 
     st.subheader('📂 파일 업로드')
-    st.caption('CSV 1개(필수) + 매니페스트/라벨 PDF를 업로드하세요')
+    if _use_sheet_source:
+        st.caption('매니페스트/라벨 PDF만 업로드하세요 (CSV 불필요 — 시트 데이터 사용)')
+    else:
+        st.caption('CSV 1개(필수) + 매니페스트/라벨 PDF를 업로드하세요')
 
     reprint_files = st.file_uploader(
-        '파일 선택 (CSV + PDF)',
-        type=['csv', 'xlsx', 'pdf'],
+        '파일 선택 (CSV + PDF)' if not _use_sheet_source else '파일 선택 (PDF)',
+        type=(['pdf'] if _use_sheet_source else ['csv', 'xlsx', 'pdf']),
         accept_multiple_files=True,
         key='reprint_files'
     )
@@ -2774,7 +3125,9 @@ with tab7:
                 rp_label_files.append((f.name, f))
 
         st.markdown(f'**분류 결과:**')
-        if rp_csv:
+        if _use_sheet_source:
+            st.markdown(f'- 📋 시트 데이터: `피킹&분류 로드됨 ({len(st.session_state.pick_df_출고)}행)`')
+        elif rp_csv:
             st.markdown(f'- CSV: `{rp_csv.name}`')
         else:
             st.error('⚠️ CSV 파일은 필수입니다. 송장번호 매칭에 사용됩니다.')
@@ -2782,7 +3135,7 @@ with tab7:
         st.markdown(f'- 매니페스트 PDF: **{len(rp_manifest_files)}개**')
         st.markdown(f'- 라벨 PDF: **{len(rp_label_files)}개**')
 
-        if not rp_csv:
+        if not _use_sheet_source and not rp_csv:
             st.stop()
 
         if not rp_manifest_files and not rp_label_files:
@@ -2795,221 +3148,70 @@ with tab7:
                 rp_status = st.empty()
 
                 try:
-                    # ===== 1. CSV/엑셀 파싱 → 송장번호 목록 추출 =====
-                    rp_status.text('📄 데이터 분석 중...')
-                    file_bytes = rp_csv.read()
-                    if rp_csv.name.lower().endswith('.xlsx'):
-                        rp_items = _parse_xlsx_bytes(file_bytes)
+                    # 데이터 소스 준비
+                    if _use_sheet_source:
+                        rp_items = _pick_df_to_items(st.session_state.pick_df_출고)
                     else:
-                        rp_items = _parse_csv_bytes(file_bytes)
+                        file_bytes = rp_csv.read()
+                        if rp_csv.name.lower().endswith('.xlsx'):
+                            rp_items = _parse_xlsx_bytes(file_bytes)
+                        else:
+                            rp_items = _parse_csv_bytes(file_bytes)
 
-                    if not rp_items:
-                        st.error('파일에서 항목을 찾을 수 없습니다. CSV 또는 엑셀 파일을 확인하세요.')
+                    # 시트 모드면 M열(기존값) 읽어 보존
+                    _existing_map = None
+                    if _use_sheet_source:
+                        _existing_map = dict(st.session_state.get('pick_ship_to_box') or {})
+                        if not _existing_map and st.session_state.get('pick_gsheet_client'):
+                            _existing_map = pick_read_box_numbers(
+                                st.session_state.pick_gsheet_client,
+                                st.session_state.get('pick_sheet_url_출고', ''),
+                                st.session_state.get('pick_sheet_tab_출고', ''),
+                            )
+
+                    result = _run_reprint_pipeline(
+                        rp_items, rp_manifest_files, rp_label_files,
+                        existing_box_map=_existing_map,
+                        write_new_to_sheet=_use_sheet_source,
+                        sheet_client=st.session_state.get('pick_gsheet_client'),
+                        sheet_url=st.session_state.get('pick_sheet_url_출고', ''),
+                        sheet_tab=st.session_state.get('pick_sheet_tab_출고', ''),
+                        on_progress=rp_progress.progress,
+                        on_status=rp_status.text,
+                    )
+
+                    if 'error' in result:
+                        st.error(f'❌ {result["error"]}')
                         st.stop()
 
-                    # CSV의 송장번호(shipmentNumber) 목록
-                    csv_invoices = set()
-                    rp_grouped = OrderedDict()
-                    for item in rp_items:
-                        inv = item.get('shipmentNumber', '')
-                        if inv:
-                            csv_invoices.add(inv)
-                            rp_grouped.setdefault(inv, []).append(item)
-
-                    for key in rp_grouped:
-                        rp_grouped[key].sort(key=lambda x: (
-                            [int(c) if c.isdigit() else c.lower()
-                             for c in re.split(r'(\d+)', x.get('boxNumber', ''))],
-                            x.get('productName', '')
-                        ))
-
-                    st.info(f'CSV 송장번호: **{len(csv_invoices)}건** 감지')
-                    rp_progress.progress(0.2)
-
-                    # ===== 2. 매니페스트/라벨 분석 (파일명 쌍 매칭 없이 독립 처리) =====
-                    rp_status.text('📊 매니페스트/라벨 분석 중...')
-                    # 매니페스트: [(bytes, sorted_groups), ...]
-                    rp_manifest_data = []
-                    for fname, mf in rp_manifest_files:
-                        m_bytes = mf.read(); mf.seek(0)
-                        m_info = _extract_manifest_info(m_bytes)
-                        m_groups = _group_manifest_pages(m_info)
-                        sorted_m = sorted(m_groups, key=lambda g: g['invoice_number'] or '')
-                        rp_manifest_data.append((m_bytes, sorted_m))
-                    # 라벨: [(bytes, sorted_groups), ...]
-                    rp_label_data = []
-                    for fname, lf in rp_label_files:
-                        l_bytes = lf.read(); lf.seek(0)
-                        l_info = _extract_label_info(l_bytes)
-                        l_groups = _group_label_pages(l_info)
-                        sorted_l = sorted(l_groups, key=lambda g: g['invoice_number'] or '')
-                        rp_label_data.append((l_bytes, sorted_l))
-
-                    rp_progress.progress(0.4)
-
-                    # ===== 3. 매칭 결과 확인 =====
-                    all_manifest_invoices = set()
-                    # 송장번호 → 쉽먼트번호 매핑 (매니페스트에서 추출)
-                    invoice_to_shipment_id = {}  # {송장번호: 쉽먼트번호}
-                    for _, sorted_m in rp_manifest_data:
-                        for g in sorted_m:
-                            if g['invoice_number']:
-                                all_manifest_invoices.add(g['invoice_number'])
-                                if g.get('shipment_id'):
-                                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
-                    all_label_invoices = set()
-                    for _, sorted_l in rp_label_data:
-                        for g in sorted_l:
-                            if g['invoice_number']:
-                                all_label_invoices.add(g['invoice_number'])
-                                # 라벨(동봉문서)에 쉽먼트번호가 있으면 매니페스트보다 우선
-                                if g.get('shipment_id'):
-                                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
-
-                    all_pdf_invoices = all_manifest_invoices | all_label_invoices
-                    matched = csv_invoices & all_pdf_invoices
-                    not_in_manifest = csv_invoices - all_pdf_invoices
-                    not_in_csv = all_pdf_invoices - csv_invoices
-
-                    if not matched:
-                        st.error('CSV와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.')
-                        st.stop()
+                    # 시트 세션 캐시 업데이트
+                    if _use_sheet_source and result.get('ship_to_box_num'):
+                        st.session_state['pick_ship_to_box'] = result['ship_to_box_num']
 
                     col_m1, col_m2, col_m3 = st.columns(3)
                     with col_m1:
-                        st.metric('매칭됨', f'{len(matched)}건')
+                        st.metric('매칭됨', f'{result["matched"]}건')
                     with col_m2:
-                        st.metric('CSV에만 존재', f'{len(not_in_manifest)}건')
+                        st.metric('데이터에만 존재', f'{len(result["not_in_manifest"])}건')
                     with col_m3:
-                        st.metric('쉽먼트에만 존재', f'{len(not_in_csv)}건')
+                        st.metric('쉽먼트에만 존재', f'{len(result["not_in_csv"])}건')
 
-                    if not_in_manifest:
-                        with st.expander(f'CSV에만 있는 송장 ({len(not_in_manifest)}건) - 매니페스트 없음'):
-                            st.code('\n'.join(sorted(not_in_manifest)))
-                    if not_in_csv:
-                        with st.expander(f'쉽먼트에만 있는 송장 ({len(not_in_csv)}건) - 이번에 미출력'):
-                            st.code('\n'.join(sorted(not_in_csv)))
+                    if result['not_in_manifest']:
+                        with st.expander(f'데이터에만 있는 송장 ({len(result["not_in_manifest"])}건) - 매니페스트 없음'):
+                            st.code('\n'.join(result['not_in_manifest']))
+                    if result['not_in_csv']:
+                        with st.expander(f'쉽먼트에만 있는 송장 ({len(result["not_in_csv"])}건) - 이번에 미출력'):
+                            st.code('\n'.join(result['not_in_csv']))
 
-                    # ===== 4. 출고지시서 생성 (매칭된 송장만) =====
-                    rp_status.text('📄 출고지시서 생성 중...')
-                    rp_so_by_invoice = {}
-
-                    # 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호 정렬)
-                    rp_all_items = []
-                    for inv_num in sorted(matched):
-                        rp_all_items.extend(rp_grouped[inv_num])
-                    rp_ship_to_box_num = assign_box_numbers(rp_all_items)
-
-                    for inv_num in sorted(matched):
-                        inv_items = rp_grouped[inv_num]
-                        auto_box_num = rp_ship_to_box_num.get(inv_num)
-                        center = inv_items[0].get('logisticsCenter', '')
-                        gk = f"{center}_{inv_num}" if center else inv_num
-                        real_shipment_id = invoice_to_shipment_id.get(inv_num, inv_num)
-                        pdf_buf = create_work_order_pdf(gk, inv_items, real_shipment_id, auto_box_num)
-                        rp_so_by_invoice[inv_num] = pdf_buf
-
-                    rp_progress.progress(0.6)
-
-                    # ===== 5. 매칭된 송장만 필터링하여 통합 PDF 생성 =====
-                    rp_status.text('📎 통합 PDF 생성 중...')
-                    rp_final_writer = PdfWriter()          # 전체 통합
-                    rp_shipment_only_writer = PdfWriter()  # 쉽먼트만 (매니페스트 + 라벨)
-                    rp_so_only_writer = PdfWriter()        # 출고지시서만
-                    rp_total = 0
-                    rp_label_total = 0
-                    rp_shipment_total = 0
-                    rp_so_total = 0
-
-                    # 송장번호별로 매니페스트 페이지 인덱스 매핑
-                    # {invoice: [(m_bytes, [page_indices]), ...]}
-                    manifest_pages_by_inv = {}
-                    for m_bytes, sorted_m in rp_manifest_data:
-                        for g in sorted_m:
-                            inv = g['invoice_number']
-                            if not inv or inv not in matched:
-                                continue
-                            manifest_pages_by_inv.setdefault(inv, []).append((m_bytes, g['page_indices']))
-
-                    # 송장번호별로 라벨 그룹 매핑
-                    # {invoice: [(l_bytes, group), ...]}
-                    label_groups_by_inv = {}
-                    for l_bytes, sorted_l in rp_label_data:
-                        for g in sorted_l:
-                            inv = g['invoice_number']
-                            if not inv or inv not in matched:
-                                continue
-                            label_groups_by_inv.setdefault(inv, []).append((l_bytes, g))
-
-                    # 매칭된 송장 순서대로 처리: [출고지시서 → 매니페스트 → 라벨]
-                    for inv_num in sorted(matched):
-                        # 출고지시서 (전체통합 + 출고지시서만)
-                        if inv_num in rp_so_by_invoice:
-                            so_buf = rp_so_by_invoice[inv_num]
-                            so_buf.seek(0)
-                            so_reader = PdfReader(so_buf)
-                            for page in so_reader.pages:
-                                rp_final_writer.add_page(page)
-                                rp_so_only_writer.add_page(page)
-                            rp_total += len(so_reader.pages)
-                            rp_so_total += len(so_reader.pages)
-
-                        # 매니페스트 (전체통합 + 쉽먼트만)
-                        for m_bytes, page_indices in manifest_pages_by_inv.get(inv_num, []):
-                            m_reader = PdfReader(io.BytesIO(m_bytes))
-                            for pidx in page_indices:
-                                rp_final_writer.add_page(m_reader.pages[pidx])
-                                rp_shipment_only_writer.add_page(m_reader.pages[pidx])
-                                rp_total += 1
-                                rp_shipment_total += 1
-
-                        # 라벨 (전체통합 + 쉽먼트만)
-                        # label_bytes별로 묶어서 _render_labels_4up 한 번씩 호출
-                        inv_label_list = label_groups_by_inv.get(inv_num, [])
-                        if inv_label_list:
-                            grouped_by_lbytes = {}
-                            for l_bytes, grp in inv_label_list:
-                                grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
-                            for _, (l_bytes, groups) in grouped_by_lbytes.items():
-                                four_up = _render_labels_4up(l_bytes, groups)
-                                for img in four_up:
-                                    img_buf = io.BytesIO()
-                                    img.save(img_buf, format='PDF', resolution=300)
-                                    img_buf.seek(0)
-                                    lp = PdfReader(img_buf)
-                                    rp_final_writer.add_page(lp.pages[0])
-                                    rp_shipment_only_writer.add_page(lp.pages[0])
-                                    rp_total += 1
-                                    rp_label_total += 1
-                                    rp_shipment_total += 1
-
-                    rp_progress.progress(0.9)
-
-                    rp_final_buf = io.BytesIO()
-                    rp_final_writer.write(rp_final_buf)
-                    rp_final_buf.seek(0)
-
-                    rp_shipment_only_buf = io.BytesIO()
-                    rp_shipment_only_writer.write(rp_shipment_only_buf)
-                    rp_shipment_only_buf.seek(0)
-
-                    rp_so_only_buf = io.BytesIO()
-                    rp_so_only_writer.write(rp_so_only_buf)
-                    rp_so_only_buf.seek(0)
-
-                    rp_progress.progress(1.0)
-                    rp_status.text('✅ 완료!')
-
-                    # 결과를 session_state에 저장 (다운로드 버튼 클릭 후에도 유지)
                     st.session_state.reprint_result = {
-                        'final_bytes': rp_final_buf.getvalue(),
-                        'shipment_only_bytes': rp_shipment_only_buf.getvalue(),
-                        'so_only_bytes': rp_so_only_buf.getvalue(),
-                        'total': rp_total,
-                        'shipment_total': rp_shipment_total,
-                        'so_total': rp_so_total,
-                        'matched': len(matched),
-                        'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
+                        'final_bytes': result['final_bytes'],
+                        'shipment_only_bytes': result['shipment_only_bytes'],
+                        'so_only_bytes': result['so_only_bytes'],
+                        'total': result['total'],
+                        'shipment_total': result['shipment_total'],
+                        'so_total': result['so_total'],
+                        'matched': result['matched'],
+                        'timestamp': result['timestamp'],
                     }
 
                 except Exception as e:
@@ -3172,6 +3374,138 @@ with tab8:
 3. 배대지 입고 CSV 업로드 (선택)
         """)
         st.stop()
+
+    # ── 출고지시서 재출력 (피킹 시작 전에 박스번호 부여 + M열 기록) ──
+    st.divider()
+    with st.expander("📄 출고지시서 재출력 (쉽먼트/라벨 PDF 업로드 → 박스번호 부여)", expanded=False):
+        st.caption("피킹 시작 전에 쉽먼트/라벨 PDF를 업로드하면, 현재 시트 송장과 매칭해 출고지시서 PDF를 만들고 박스번호를 시트 M열에 저장합니다. 기존에 M열에 값이 있으면 그대로 유지(발주 취소 내성).")
+
+        pick_reprint_files = st.file_uploader(
+            '매니페스트/라벨 PDF (파일명에 manifest/label 포함)',
+            type=['pdf'],
+            accept_multiple_files=True,
+            key='pick_reprint_files'
+        )
+
+        if pick_reprint_files:
+            pk_manifest_files = []
+            pk_label_files = []
+            for f in pick_reprint_files:
+                fname = f.name.lower()
+                if 'manifest' in fname:
+                    pk_manifest_files.append((f.name, f))
+                elif 'label' in fname:
+                    pk_label_files.append((f.name, f))
+
+            st.markdown(f'- 매니페스트 PDF: **{len(pk_manifest_files)}개** / 라벨 PDF: **{len(pk_label_files)}개**')
+
+            if not pk_manifest_files and not pk_label_files:
+                st.warning('매니페스트 또는 라벨 PDF가 필요합니다. 파일명에 `manifest` 또는 `label`을 포함시켜 주세요.')
+            elif st.button('🔄 출고지시서 재출력 시작', type='primary', key='pick_reprint_btn'):
+                _pk_progress = st.progress(0)
+                _pk_status = st.empty()
+                try:
+                    _pk_items = _pick_df_to_items(st.session_state.pick_df_출고)
+                    _pk_existing = dict(st.session_state.get('pick_ship_to_box') or {})
+                    if (not _pk_existing
+                            and st.session_state.get('pick_gsheet_client')
+                            and st.session_state.get('pick_sheet_url_출고')):
+                        _pk_existing = pick_read_box_numbers(
+                            st.session_state.pick_gsheet_client,
+                            st.session_state.pick_sheet_url_출고,
+                            st.session_state.pick_sheet_tab_출고,
+                        )
+
+                    _pk_result = _run_reprint_pipeline(
+                        _pk_items, pk_manifest_files, pk_label_files,
+                        existing_box_map=_pk_existing,
+                        write_new_to_sheet=bool(st.session_state.get('pick_use_gsheet')),
+                        sheet_client=st.session_state.get('pick_gsheet_client'),
+                        sheet_url=st.session_state.get('pick_sheet_url_출고', ''),
+                        sheet_tab=st.session_state.get('pick_sheet_tab_출고', ''),
+                        on_progress=_pk_progress.progress,
+                        on_status=_pk_status.text,
+                    )
+
+                    if 'error' in _pk_result:
+                        st.error(f'❌ {_pk_result["error"]}')
+                    else:
+                        if _pk_result.get('ship_to_box_num'):
+                            st.session_state['pick_ship_to_box'] = _pk_result['ship_to_box_num']
+                        _n_new = len(_pk_result.get('new_box_only') or {})
+                        _n_reuse = _pk_result['matched'] - _n_new
+                        st.success(
+                            f'✅ 재출력 완료 — 매칭 {_pk_result["matched"]}건 '
+                            f'(신규 박스번호 {_n_new}건 기록 / 기존 {_n_reuse}건 재사용)'
+                        )
+
+                        _c1, _c2, _c3 = st.columns(3)
+                        with _c1:
+                            st.metric('매칭됨', f'{_pk_result["matched"]}건')
+                        with _c2:
+                            st.metric('데이터에만', f'{len(_pk_result["not_in_manifest"])}건')
+                        with _c3:
+                            st.metric('쉽먼트에만', f'{len(_pk_result["not_in_csv"])}건')
+
+                        if _pk_result['not_in_manifest']:
+                            with st.expander(f'데이터에만 있는 송장 ({len(_pk_result["not_in_manifest"])}건)'):
+                                st.code('\n'.join(_pk_result['not_in_manifest']))
+                        if _pk_result['not_in_csv']:
+                            with st.expander(f'쉽먼트에만 있는 송장 ({len(_pk_result["not_in_csv"])}건)'):
+                                st.code('\n'.join(_pk_result['not_in_csv']))
+
+                        st.session_state['pick_reprint_result'] = {
+                            'final_bytes': _pk_result['final_bytes'],
+                            'shipment_only_bytes': _pk_result['shipment_only_bytes'],
+                            'so_only_bytes': _pk_result['so_only_bytes'],
+                            'total': _pk_result['total'],
+                            'shipment_total': _pk_result['shipment_total'],
+                            'so_total': _pk_result['so_total'],
+                            'matched': _pk_result['matched'],
+                            'timestamp': _pk_result['timestamp'],
+                        }
+                except Exception as e:
+                    st.error(f'❌ 오류: {e}')
+                    import traceback
+                    st.code(traceback.format_exc())
+
+        # 결과 다운로드 버튼 (rerun 후에도 유지)
+        if 'pick_reprint_result' in st.session_state:
+            _pres = st.session_state['pick_reprint_result']
+            st.divider()
+            st.markdown(
+                f"**결과**: 출고지시서 {_pres['so_total']}p / "
+                f"쉽먼트 {_pres['shipment_total']}p / 전체 {_pres['total']}p"
+            )
+            _dc1, _dc2, _dc3 = st.columns(3)
+            with _dc1:
+                st.download_button(
+                    f"⬇️ 전체 통합 PDF ({_pres['total']}p)",
+                    data=_pres['final_bytes'],
+                    file_name=f"shipment_reprint_ALL_{_pres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='pick_reprint_dl_all',
+                    type='primary',
+                    use_container_width=True,
+                )
+            with _dc2:
+                st.download_button(
+                    f"⬇️ 쉽먼트만 ({_pres['shipment_total']}p)",
+                    data=_pres['shipment_only_bytes'],
+                    file_name=f"shipment_reprint_shipment_{_pres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='pick_reprint_dl_ship',
+                    use_container_width=True,
+                )
+            with _dc3:
+                st.download_button(
+                    f"⬇️ 출고지시서만 ({_pres['so_total']}p)",
+                    data=_pres['so_only_bytes'],
+                    file_name=f"출고지시서_{_pres['timestamp']}.pdf",
+                    mime='application/pdf',
+                    key='pick_reprint_dl_so',
+                    use_container_width=True,
+                )
 
     # ── 모드 토글 (피킹 검증 ↔ 입고 분류) ──
     st.divider()
@@ -3666,8 +4000,8 @@ with tab8:
         import pandas as _pd2
         df_sort = st.session_state.pick_df_출고
 
-        # ── 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호) ──
-        # df_sort → items 리스트로 변환하여 assign_box_numbers 재활용
+        # ── 송장별 박스번호: 시트 M열(기존값) 우선 보존 + 신규만 부여 ──
+        # 박스번호가 시트 M열에 영구 저장되므로 발주 취소돼도 재정렬 안 됨.
         sort_items_for_box = []
         for _, row in df_sort.iterrows():
             sort_items_for_box.append({
@@ -3676,7 +4010,58 @@ with tab8:
                 'expectedDate': str(row.get('입고예정일(EDD)', '') or row.get('입고예정일', '') or '').strip(),
                 'boxNumber': str(row.get('박스번호', '') or '').strip(),
             })
-        sort_ship_to_box = assign_box_numbers(sort_items_for_box)
+
+        # 1) 시트 M열에서 기존 박스번호 읽기 (gsheet 모드 + 세션 캐시)
+        _pick_url = st.session_state.get('pick_sheet_url_출고', '')
+        _pick_tab = st.session_state.get('pick_sheet_tab_출고', '')
+        _existing_box_map = {}
+        if (st.session_state.get('pick_use_gsheet')
+                and st.session_state.get('pick_gsheet_client')
+                and _pick_url and _pick_tab):
+            _cache_key = f"_pick_existing_box_{_pick_url}_{_pick_tab}"
+            if _cache_key in st.session_state:
+                _existing_box_map = st.session_state[_cache_key]
+            else:
+                _existing_box_map = pick_read_box_numbers(
+                    st.session_state.pick_gsheet_client, _pick_url, _pick_tab
+                )
+                st.session_state[_cache_key] = _existing_box_map
+
+        # 2) 기존 유지 + 신규 송장만 순차 부여
+        sort_ship_to_box = assign_box_numbers_with_existing(
+            sort_items_for_box, _existing_box_map
+        )
+
+        # 3) 신규 부여된 것만 시트 M열에 기록 (백그라운드, 기존값 보존)
+        if (st.session_state.get('pick_use_gsheet')
+                and st.session_state.get('pick_gsheet_client')
+                and _pick_url and _pick_tab):
+            _new_only = {s: n for s, n in sort_ship_to_box.items()
+                         if s not in _existing_box_map}
+            _written_key = f"_pick_box_written_{_pick_url}_{_pick_tab}"
+            _last_written = st.session_state.get(_written_key, {})
+            _to_write = {s: n for s, n in _new_only.items()
+                         if _last_written.get(s) != n}
+            if _to_write:
+                import threading
+                _client = st.session_state.pick_gsheet_client
+                _updates_new = dict(_to_write)
+                def _bg_write_box():
+                    try:
+                        pick_write_box_numbers(_client, _pick_url, _pick_tab,
+                                               _updates_new, only_empty=True)
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_write_box, daemon=True).start()
+                # 세션 캐시 갱신 — 다음 rerun에서 중복 기록 방지
+                _merged = dict(_existing_box_map)
+                _merged.update(_new_only)
+                st.session_state[_cache_key] = _merged
+                _last_written.update(_to_write)
+                st.session_state[_written_key] = _last_written
+
+        # 쉽먼트 재출력 탭에서 재사용하도록 세션에 저장
+        st.session_state['pick_ship_to_box'] = sort_ship_to_box
 
         # ── 바코드 → (배대지박스, 송장박스, 수량, 상품명, 송장) 매핑 ──
         def _build_sort_state():
