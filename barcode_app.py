@@ -650,6 +650,47 @@ def assign_box_numbers(items):
     return {s[2]: idx + 1 for idx, s in enumerate(sorted_ships)}
 
 
+def assign_box_numbers_with_existing(items, existing_box_map):
+    """기존 매핑(시트 M열)을 보존하고, 그 외 송장만 신규 번호 부여.
+    - existing_box_map에 있는 송장은 기존 번호 그대로 유지 (발주 취소돼도 고정)
+    - 신규 송장은 max(기존)+1 부터 (입고예정일>물류센터>송장번호) 순으로 부여
+    반환: {송장번호: 박스번호(int)}
+    """
+    result = {}
+    for s, v in (existing_box_map or {}).items():
+        s = str(s).strip()
+        try:
+            n = int(str(v).strip())
+            if s and n > 0:
+                result[s] = n
+        except (ValueError, TypeError):
+            continue
+    ship_info = {}
+    ship_valid = {}
+    for it in items or []:
+        ship = str(it.get('shipmentNumber', '') or '').strip()
+        if not ship or ship in result:
+            continue
+        bn_raw = str(it.get('boxNumber', '') or '').strip()
+        is_domestic = bool(bn_raw) and any(kw in bn_raw for kw in ('국내', '부족', '재고', 'RAW'))
+        has_valid_box = bool(bn_raw) and not is_domestic
+        if ship not in ship_info:
+            center = str(it.get('logisticsCenter', '') or '').strip()
+            edate = str(it.get('expectedDate', '') or '').strip()
+            ship_info[ship] = (edate, center, ship)
+            ship_valid[ship] = has_valid_box
+        else:
+            if has_valid_box:
+                ship_valid[ship] = True
+    valid_new = {s: info for s, info in ship_info.items() if ship_valid.get(s, False)}
+    sorted_new = sorted(valid_new.values(), key=lambda x: (x[0], x[1], x[2]))
+    next_num = max(result.values(), default=0) + 1
+    for s in sorted_new:
+        result[s[2]] = next_num
+        next_num += 1
+    return result
+
+
 def create_shipment_barcodes_pdf(shipment_numbers):
     """송장번호 리스트 → 바코드 PDF (한 페이지에 여러 송장 배치)"""
     from reportlab.platypus import Image as RLImage
@@ -1027,6 +1068,69 @@ def pick_update_check_qty(client, sheet_url, tab_name, barcode, ship_num, scanne
         return False
 
 
+def pick_read_box_numbers(client, sheet_url, tab_name):
+    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열, 13번째) 매핑을 읽음.
+    M열이 비어있거나 숫자가 아닌 행은 제외.
+    반환: {송장번호: 박스번호(int)}
+    """
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return {}
+        mapping = {}
+        for row in all_values[1:]:
+            ship = str(row[8]).strip() if len(row) > 8 else ''
+            box = str(row[12]).strip() if len(row) > 12 else ''
+            if not ship or not box:
+                continue
+            try:
+                n = int(box)
+                if n > 0:
+                    mapping[ship] = n
+            except ValueError:
+                continue
+        return mapping
+    except Exception:
+        return {}
+
+
+def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=True):
+    """출고확인 시트 M열(13번째)에 송장별 박스번호 기록 (batch).
+    only_empty=True이면 M열이 비어있는 행만 쓰기(기존 값 보존).
+    반환: 기록된 셀 수
+    """
+    if not ship_to_box:
+        return 0
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            return 0
+        updates = []
+        for row_idx in range(1, len(all_values)):
+            row = all_values[row_idx]
+            ship = str(row[8]).strip() if len(row) > 8 else ''
+            if not ship or ship not in ship_to_box:
+                continue
+            current_m = str(row[12]).strip() if len(row) > 12 else ''
+            if only_empty and current_m:
+                continue
+            updates.append({
+                'range': f'M{row_idx + 1}',
+                'values': [[str(ship_to_box[ship])]],
+            })
+        if updates:
+            ws.batch_update(updates)
+        return len(updates)
+    except Exception:
+        return 0
+
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -1123,6 +1227,10 @@ def pick_load_all_data(url_출고, tab_출고, url_배대지="", tab_배대지="
     if client:
         st.session_state.pick_gsheet_client = client
         st.session_state.pick_use_gsheet = True
+        # 시트 재로드 시 M열 캐시 초기화 (발주 변동 반영)
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("_pick_existing_box_") or _k.startswith("_pick_box_written_"):
+                del st.session_state[_k]
         # 출고지시서(쉽먼트시트) 로드
         if url_출고 and tab_출고:
             df_출고 = pick_load_sheet_as_df(client, url_출고, tab_출고)
@@ -2743,18 +2851,54 @@ with tab6:
                     )
 
 # ── 쉽먼트 재출력 탭 ──────────────────────────────────────
+def _pick_df_to_items(df):
+    """피킹&분류 탭의 df_출고 → create_work_order_pdf 용 items 리스트 변환"""
+    items = []
+    for _, row in df.iterrows():
+        try:
+            qty = int(row.get('수량', 0) or 0)
+        except (ValueError, TypeError):
+            qty = 0
+        items.append({
+            'logisticsCenter': str(row.get('물류센터(FC)', '') or '').strip(),
+            'expectedDate': str(row.get('입고예정일(EDD)', '') or row.get('입고예정일', '') or '').strip(),
+            'productBarcode': str(row.get('바코드', '') or '').strip(),
+            'productName': str(row.get('상품명', '') or '').strip(),
+            'quantity': qty,
+            'shipmentNumber': str(row.get('쉽먼트운송장번호', '') or '').strip(),
+            'orderDate': str(row.get('발주일', '') or '').strip(),
+            'boxNumber': str(row.get('박스번호', '') or '').strip(),
+            'location': str(row.get('위치', '') or row.get('적재위치', '') or '').strip(),
+        })
+    return items
+
+
 with tab7:
     st.header('🔄 쉽먼트 재출력')
-    st.caption('CSV(출고지시서)의 송장번호와 매니페스트/라벨의 송장번호를 매칭하여, CSV에 있는 송장만 골라 재출력합니다')
+    st.caption('피킹&분류에 로드된 시트 데이터(또는 CSV)의 송장번호와 매니페스트/라벨을 매칭하여 재출력합니다')
+
+    # ── 데이터 소스 모드 선택 ──
+    _has_sheet_data = st.session_state.get('pick_df_출고') is not None
+    _use_sheet_source = False
+    if _has_sheet_data:
+        _use_sheet_source = st.toggle(
+            '📋 피킹&분류 시트 데이터 사용 (박스번호는 시트 M열에서 보존)',
+            value=True,
+            key='reprint_use_sheet',
+            help='시트에 이미 박스번호가 저장되어 있어서 CSV 업로드 없이도 쉽먼트/라벨만 올리면 됩니다. 발주 취소돼도 박스번호 안 틀어짐.'
+        )
 
     st.divider()
 
     st.subheader('📂 파일 업로드')
-    st.caption('CSV 1개(필수) + 매니페스트/라벨 PDF를 업로드하세요')
+    if _use_sheet_source:
+        st.caption('매니페스트/라벨 PDF만 업로드하세요 (CSV 불필요 — 시트 데이터 사용)')
+    else:
+        st.caption('CSV 1개(필수) + 매니페스트/라벨 PDF를 업로드하세요')
 
     reprint_files = st.file_uploader(
-        '파일 선택 (CSV + PDF)',
-        type=['csv', 'xlsx', 'pdf'],
+        '파일 선택 (CSV + PDF)' if not _use_sheet_source else '파일 선택 (PDF)',
+        type=(['pdf'] if _use_sheet_source else ['csv', 'xlsx', 'pdf']),
         accept_multiple_files=True,
         key='reprint_files'
     )
@@ -2774,7 +2918,9 @@ with tab7:
                 rp_label_files.append((f.name, f))
 
         st.markdown(f'**분류 결과:**')
-        if rp_csv:
+        if _use_sheet_source:
+            st.markdown(f'- 📋 시트 데이터: `피킹&분류 로드됨 ({len(st.session_state.pick_df_출고)}행)`')
+        elif rp_csv:
             st.markdown(f'- CSV: `{rp_csv.name}`')
         else:
             st.error('⚠️ CSV 파일은 필수입니다. 송장번호 매칭에 사용됩니다.')
@@ -2782,7 +2928,7 @@ with tab7:
         st.markdown(f'- 매니페스트 PDF: **{len(rp_manifest_files)}개**')
         st.markdown(f'- 라벨 PDF: **{len(rp_label_files)}개**')
 
-        if not rp_csv:
+        if not _use_sheet_source and not rp_csv:
             st.stop()
 
         if not rp_manifest_files and not rp_label_files:
@@ -2795,16 +2941,19 @@ with tab7:
                 rp_status = st.empty()
 
                 try:
-                    # ===== 1. CSV/엑셀 파싱 → 송장번호 목록 추출 =====
+                    # ===== 1. 데이터 소스 파싱 → 송장번호 목록 추출 =====
                     rp_status.text('📄 데이터 분석 중...')
-                    file_bytes = rp_csv.read()
-                    if rp_csv.name.lower().endswith('.xlsx'):
-                        rp_items = _parse_xlsx_bytes(file_bytes)
+                    if _use_sheet_source:
+                        rp_items = _pick_df_to_items(st.session_state.pick_df_출고)
                     else:
-                        rp_items = _parse_csv_bytes(file_bytes)
+                        file_bytes = rp_csv.read()
+                        if rp_csv.name.lower().endswith('.xlsx'):
+                            rp_items = _parse_xlsx_bytes(file_bytes)
+                        else:
+                            rp_items = _parse_csv_bytes(file_bytes)
 
                     if not rp_items:
-                        st.error('파일에서 항목을 찾을 수 없습니다. CSV 또는 엑셀 파일을 확인하세요.')
+                        st.error('데이터에서 항목을 찾을 수 없습니다.')
                         st.stop()
 
                     # CSV의 송장번호(shipmentNumber) 목록
@@ -2894,11 +3043,37 @@ with tab7:
                     rp_status.text('📄 출고지시서 생성 중...')
                     rp_so_by_invoice = {}
 
-                    # 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호 정렬)
+                    # 송장별 박스번호: 시트 모드면 M열(기존값) 우선 보존
                     rp_all_items = []
                     for inv_num in sorted(matched):
                         rp_all_items.extend(rp_grouped[inv_num])
-                    rp_ship_to_box_num = assign_box_numbers(rp_all_items)
+                    if _use_sheet_source:
+                        _sheet_box_map = dict(st.session_state.get('pick_ship_to_box') or {})
+                        if not _sheet_box_map and st.session_state.get('pick_gsheet_client'):
+                            _sheet_box_map = pick_read_box_numbers(
+                                st.session_state.pick_gsheet_client,
+                                st.session_state.get('pick_sheet_url_출고', ''),
+                                st.session_state.get('pick_sheet_tab_출고', ''),
+                            )
+                        rp_ship_to_box_num = assign_box_numbers_with_existing(
+                            rp_all_items, _sheet_box_map
+                        )
+                        # 신규 부여된 박스번호는 시트 M열에도 기록 (기존값 보존)
+                        _new_box_only = {s: n for s, n in rp_ship_to_box_num.items()
+                                         if s not in _sheet_box_map}
+                        if _new_box_only and st.session_state.get('pick_gsheet_client'):
+                            try:
+                                pick_write_box_numbers(
+                                    st.session_state.pick_gsheet_client,
+                                    st.session_state.get('pick_sheet_url_출고', ''),
+                                    st.session_state.get('pick_sheet_tab_출고', ''),
+                                    _new_box_only, only_empty=True,
+                                )
+                                st.session_state['pick_ship_to_box'] = rp_ship_to_box_num
+                            except Exception:
+                                pass
+                    else:
+                        rp_ship_to_box_num = assign_box_numbers(rp_all_items)
 
                     for inv_num in sorted(matched):
                         inv_items = rp_grouped[inv_num]
@@ -3666,8 +3841,8 @@ with tab8:
         import pandas as _pd2
         df_sort = st.session_state.pick_df_출고
 
-        # ── 송장별 박스번호 자동 부여 (입고예정일>물류센터>송장번호) ──
-        # df_sort → items 리스트로 변환하여 assign_box_numbers 재활용
+        # ── 송장별 박스번호: 시트 M열(기존값) 우선 보존 + 신규만 부여 ──
+        # 박스번호가 시트 M열에 영구 저장되므로 발주 취소돼도 재정렬 안 됨.
         sort_items_for_box = []
         for _, row in df_sort.iterrows():
             sort_items_for_box.append({
@@ -3676,7 +3851,58 @@ with tab8:
                 'expectedDate': str(row.get('입고예정일(EDD)', '') or row.get('입고예정일', '') or '').strip(),
                 'boxNumber': str(row.get('박스번호', '') or '').strip(),
             })
-        sort_ship_to_box = assign_box_numbers(sort_items_for_box)
+
+        # 1) 시트 M열에서 기존 박스번호 읽기 (gsheet 모드 + 세션 캐시)
+        _pick_url = st.session_state.get('pick_sheet_url_출고', '')
+        _pick_tab = st.session_state.get('pick_sheet_tab_출고', '')
+        _existing_box_map = {}
+        if (st.session_state.get('pick_use_gsheet')
+                and st.session_state.get('pick_gsheet_client')
+                and _pick_url and _pick_tab):
+            _cache_key = f"_pick_existing_box_{_pick_url}_{_pick_tab}"
+            if _cache_key in st.session_state:
+                _existing_box_map = st.session_state[_cache_key]
+            else:
+                _existing_box_map = pick_read_box_numbers(
+                    st.session_state.pick_gsheet_client, _pick_url, _pick_tab
+                )
+                st.session_state[_cache_key] = _existing_box_map
+
+        # 2) 기존 유지 + 신규 송장만 순차 부여
+        sort_ship_to_box = assign_box_numbers_with_existing(
+            sort_items_for_box, _existing_box_map
+        )
+
+        # 3) 신규 부여된 것만 시트 M열에 기록 (백그라운드, 기존값 보존)
+        if (st.session_state.get('pick_use_gsheet')
+                and st.session_state.get('pick_gsheet_client')
+                and _pick_url and _pick_tab):
+            _new_only = {s: n for s, n in sort_ship_to_box.items()
+                         if s not in _existing_box_map}
+            _written_key = f"_pick_box_written_{_pick_url}_{_pick_tab}"
+            _last_written = st.session_state.get(_written_key, {})
+            _to_write = {s: n for s, n in _new_only.items()
+                         if _last_written.get(s) != n}
+            if _to_write:
+                import threading
+                _client = st.session_state.pick_gsheet_client
+                _updates_new = dict(_to_write)
+                def _bg_write_box():
+                    try:
+                        pick_write_box_numbers(_client, _pick_url, _pick_tab,
+                                               _updates_new, only_empty=True)
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_write_box, daemon=True).start()
+                # 세션 캐시 갱신 — 다음 rerun에서 중복 기록 방지
+                _merged = dict(_existing_box_map)
+                _merged.update(_new_only)
+                st.session_state[_cache_key] = _merged
+                _last_written.update(_to_write)
+                st.session_state[_written_key] = _last_written
+
+        # 쉽먼트 재출력 탭에서 재사용하도록 세션에 저장
+        st.session_state['pick_ship_to_box'] = sort_ship_to_box
 
         # ── 바코드 → (배대지박스, 송장박스, 수량, 상품명, 송장) 매핑 ──
         def _build_sort_state():
