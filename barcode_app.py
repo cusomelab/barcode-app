@@ -2163,10 +2163,12 @@ def _extract_manifest_info(pdf_bytes):
         invoice_match = re.search(r'송장번호\s*\n?\s*(\d{12,})', text)
         if not invoice_match:
             invoice_match = re.search(r'(4\d{11})', text)
-        # 쉽먼트번호 (7~10자리, 보통 8자리)
-        shipment_id_match = re.search(r'쉽먼트\s*번호\s*\n?\s*(\d{7,10})', text)
+        # 쉽먼트번호 (7~10자리, 보통 8자리) — \b로 12자리 운송장번호와 혼동 방지
+        shipment_id_match = re.search(r'쉽먼트\s*번호\s*\n\s*(\d{7,10})\b', text)
         if not shipment_id_match:
-            shipment_id_match = re.search(r'쉽먼트\s*(\d{7,10})', text)
+            shipment_id_match = re.search(r'쉽먼트\s*번호[\s:]+(\d{7,10})\b', text)
+        if not shipment_id_match:
+            shipment_id_match = re.search(r'쉽먼트\s*번호.{0,50}?\b(\d{7,10})\b', text, re.DOTALL)
         pages_info.append({
             'page_idx': i,
             'box_number': box_match.group(1) if box_match else None,
@@ -2186,10 +2188,13 @@ def _extract_label_info(pdf_bytes):
         text = page.extract_text() or ''
         box_match = re.search(r'박스\s*(\d+-\d+)', text)
         invoice_match = re.search(r'(4\d{11})', text)
-        # 동봉문서에 '쉽먼트번호 45596721' 형태로 있음
-        shipment_id_match = re.search(r'쉽먼트\s*번호[\s:]*\n?[\s:]*(\d{7,10})', text)
+        # 동봉문서 '쉽먼트번호\n45232459' 추출 (레이아웃: 라벨 다음 줄에 값)
+        shipment_id_match = re.search(r'쉽먼트\s*번호\s*\n\s*(\d{7,10})\b', text)
         if not shipment_id_match:
-            shipment_id_match = re.search(r'쉽먼트번호\s*\n?\s*(\d{7,10})', text)
+            shipment_id_match = re.search(r'쉽먼트\s*번호[\s:]+(\d{7,10})\b', text)
+        if not shipment_id_match:
+            # 유연 패턴: 쉽먼트번호 ~ 50자 안에 7~10자리 독립 숫자
+            shipment_id_match = re.search(r'쉽먼트\s*번호.{0,50}?\b(\d{7,10})\b', text, re.DOTALL)
         pages_info.append({
             'page_idx': i,
             'box_number': box_match.group(1) if box_match else None,
