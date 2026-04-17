@@ -341,15 +341,44 @@ def create_work_order_pdf(group_key, items, shipment_id=None, box_number=None):
     barcode_flowable = None
     if invoice_for_barcode:
         try:
-            from reportlab.platypus import Image as RLImage
-            bc_img = get_barcode_img(str(invoice_for_barcode), write_text=False)
-            bc_buf = io.BytesIO()
-            bc_img.save(bc_buf, format='PNG')
-            bc_buf.seek(0)
-            barcode_flowable = RLImage(bc_buf, width=70*mm, height=14*mm)
-            barcode_flowable.hAlign = 'RIGHT'
+            # 벡터 기반 Code128 (PNG보다 훨씬 선명)
+            from reportlab.graphics.barcode.code128 import Code128
+            from reportlab.graphics.shapes import Drawing
+            from reportlab.graphics import renderPDF
+            from reportlab.platypus import Flowable
+
+            class _BarcodeFlowable(Flowable):
+                def __init__(self, value, width_mm=70, height_mm=14):
+                    Flowable.__init__(self)
+                    self.value = str(value)
+                    self.width = width_mm * mm
+                    self.height = height_mm * mm
+                    self.hAlign = 'RIGHT'
+
+                def draw(self):
+                    # barWidth를 원하는 폭에 맞춰 계산 (여백 포함)
+                    # Code128은 가변 길이라 렌더 후 스케일링
+                    bc = Code128(self.value, barHeight=self.height, humanReadable=False)
+                    bc_w = bc.width
+                    scale = self.width / bc_w if bc_w > 0 else 1
+                    self.canv.saveState()
+                    self.canv.scale(scale, 1)
+                    bc.drawOn(self.canv, 0, 0)
+                    self.canv.restoreState()
+
+            barcode_flowable = _BarcodeFlowable(invoice_for_barcode, width_mm=70, height_mm=14)
         except Exception:
-            barcode_flowable = None
+            # Fallback: 기존 PNG 방식
+            try:
+                from reportlab.platypus import Image as RLImage
+                bc_img = get_barcode_img(str(invoice_for_barcode), write_text=False)
+                bc_buf = io.BytesIO()
+                bc_img.save(bc_buf, format='PNG')
+                bc_buf.seek(0)
+                barcode_flowable = RLImage(bc_buf, width=70*mm, height=14*mm)
+                barcode_flowable.hAlign = 'RIGHT'
+            except Exception:
+                barcode_flowable = None
 
     # ── 상단 큰 박스번호 표시 ──
     # 호출 시 box_number 인자로 전달된 값을 사용 (자동 부여된 송장별 박스번호)
@@ -2150,17 +2179,22 @@ def _extract_manifest_info(pdf_bytes):
 
 
 def _extract_label_info(pdf_bytes):
-    """라벨 PDF 바이트에서 박스/송장 정보 추출"""
+    """라벨(동봉문서) PDF 바이트에서 박스/송장/쉽먼트번호 정보 추출"""
     pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
     pages_info = []
     for i, page in enumerate(pdf.pages):
         text = page.extract_text() or ''
         box_match = re.search(r'박스\s*(\d+-\d+)', text)
         invoice_match = re.search(r'(4\d{11})', text)
+        # 동봉문서에 '쉽먼트번호 45596721' 형태로 있음
+        shipment_id_match = re.search(r'쉽먼트\s*번호[\s:]*\n?[\s:]*(\d{7,10})', text)
+        if not shipment_id_match:
+            shipment_id_match = re.search(r'쉽먼트번호\s*\n?\s*(\d{7,10})', text)
         pages_info.append({
             'page_idx': i,
             'box_number': box_match.group(1) if box_match else None,
             'invoice_number': invoice_match.group(1) if invoice_match else None,
+            'shipment_id': shipment_id_match.group(1) if shipment_id_match else None,
         })
     pdf.close()
     return pages_info
@@ -2196,10 +2230,17 @@ def _group_label_pages(pages_info):
     for info in pages_info:
         box = info['box_number']
         if box not in box_groups:
-            box_groups[box] = {'box_number': box, 'invoice_number': info['invoice_number'], 'page_indices': []}
+            box_groups[box] = {
+                'box_number': box,
+                'invoice_number': info['invoice_number'],
+                'shipment_id': info.get('shipment_id'),
+                'page_indices': [],
+            }
         box_groups[box]['page_indices'].append(info['page_idx'])
         if not box_groups[box]['invoice_number'] and info['invoice_number']:
             box_groups[box]['invoice_number'] = info['invoice_number']
+        if not box_groups[box].get('shipment_id') and info.get('shipment_id'):
+            box_groups[box]['shipment_id'] = info['shipment_id']
     return list(box_groups.values())
 
 
@@ -2444,6 +2485,19 @@ with tab6:
                                 invoice_mapping[g['invoice_number']] = (sid, g['box_number'])
                                 if g.get('shipment_id'):
                                     inv_to_ship_id_map[g['invoice_number']] = g['shipment_id']
+
+                        # 라벨(동봉문서) PDF에서도 쉽먼트번호 추출 (매니페스트에 없을 수도 있음)
+                        try:
+                            l_bytes = lf.read()
+                            lf.seek(0)
+                            l_info = _extract_label_info(l_bytes)
+                            l_groups = _group_label_pages(l_info)
+                            for g in l_groups:
+                                if g.get('invoice_number') and g.get('shipment_id'):
+                                    # 라벨에서 추출한 것을 우선 (매니페스트 값 덮어쓰기)
+                                    inv_to_ship_id_map[g['invoice_number']] = g['shipment_id']
+                        except Exception:
+                            pass
 
                     # ===== 2. CSV → 출고지시서 PDF 생성 (송장번호별) =====
                     so_by_invoice = {}  # 송장번호 → PDF BytesIO
@@ -2803,6 +2857,9 @@ with tab7:
                         for g in sorted_l:
                             if g['invoice_number']:
                                 all_label_invoices.add(g['invoice_number'])
+                                # 라벨(동봉문서)에 쉽먼트번호가 있으면 매니페스트보다 우선
+                                if g.get('shipment_id'):
+                                    invoice_to_shipment_id[g['invoice_number']] = g['shipment_id']
 
                     all_pdf_invoices = all_manifest_invoices | all_label_invoices
                     matched = csv_invoices & all_pdf_invoices
@@ -3567,7 +3624,7 @@ with tab8:
                     ship_box_str = ",".join(ship_boxes) if ship_boxes else ""
                     rows.append({
                         "상태": status_txt, "바코드": bc,
-                        "상품명": info["상품명"][:35] + ("..." if len(info["상품명"]) > 35 else ""),
+                        "상품명": info["상품명"],
                         "쉽먼트박스": ship_box_str,
                         "필요": n, "스캔": s, "남은": max(0, n - s),
                         "회차": info.get("회차기호",""), "박스": info.get("박스번호",""),
