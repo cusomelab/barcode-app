@@ -1068,39 +1068,47 @@ def pick_update_check_qty(client, sheet_url, tab_name, barcode, ship_num, scanne
         return False
 
 
+_SHEET_SHIP_COL_IDX = 8   # I열 (송장번호), 0-based
+_SHEET_QTY_COL_IDX = 11   # L열 (확인수량), 0-based → update_cell에는 +1=12
+_SHEET_BOX_COL_IDX = 12   # M열 (출고박스번호), 0-based → update_cell에는 +1=13
+_SHEET_BOX_COL_LETTER = 'M'
+
+
 def pick_read_box_numbers(client, sheet_url, tab_name):
-    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열, 13번째) 매핑을 읽음.
+    """출고확인 시트에서 송장번호(I열) → 출고박스번호(M열) 매핑을 읽음.
     M열이 비어있거나 숫자가 아닌 행은 제외.
-    반환: {송장번호: 박스번호(int)}
+    반환: {송장번호: 박스번호(int)} (성공, 빈 dict 포함 가능)
+         / None (API 호출 실패 — 읽기 자체가 안 됨)
     """
     try:
         sheet_id = _extract_sheet_id(sheet_url)
         spreadsheet = client.open_by_key(sheet_id)
         ws = spreadsheet.worksheet(tab_name)
         all_values = ws.get_all_values()
-        if len(all_values) < 2:
-            return {}
-        mapping = {}
-        for row in all_values[1:]:
-            ship = str(row[8]).strip() if len(row) > 8 else ''
-            box = str(row[12]).strip() if len(row) > 12 else ''
-            if not ship or not box:
-                continue
-            try:
-                n = int(box)
-                if n > 0:
-                    mapping[ship] = n
-            except ValueError:
-                continue
-        return mapping
     except Exception:
+        return None
+    if len(all_values) < 2:
         return {}
+    mapping = {}
+    for row in all_values[1:]:
+        ship = str(row[_SHEET_SHIP_COL_IDX]).strip() if len(row) > _SHEET_SHIP_COL_IDX else ''
+        box = str(row[_SHEET_BOX_COL_IDX]).strip() if len(row) > _SHEET_BOX_COL_IDX else ''
+        if not ship or not box:
+            continue
+        try:
+            # "36" / " 36 " / "36.0" (엑셀 float 표기) 모두 허용
+            n = int(float(box))
+            if n > 0:
+                mapping[ship] = n
+        except (ValueError, TypeError):
+            continue
+    return mapping
 
 
 def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=True):
-    """출고확인 시트 M열(13번째)에 송장별 박스번호 기록 (batch).
+    """출고확인 시트 M열에 송장별 박스번호 기록 (batch).
     only_empty=True이면 M열이 비어있는 행만 쓰기(기존 값 보존).
-    반환: 기록된 셀 수
+    반환: 기록된 셀 수 / -1 (API 실패 시)
     """
     if not ship_to_box:
         return 0
@@ -1114,21 +1122,21 @@ def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=
         updates = []
         for row_idx in range(1, len(all_values)):
             row = all_values[row_idx]
-            ship = str(row[8]).strip() if len(row) > 8 else ''
+            ship = str(row[_SHEET_SHIP_COL_IDX]).strip() if len(row) > _SHEET_SHIP_COL_IDX else ''
             if not ship or ship not in ship_to_box:
                 continue
-            current_m = str(row[12]).strip() if len(row) > 12 else ''
+            current_m = str(row[_SHEET_BOX_COL_IDX]).strip() if len(row) > _SHEET_BOX_COL_IDX else ''
             if only_empty and current_m:
                 continue
             updates.append({
-                'range': f'M{row_idx + 1}',
+                'range': f'{_SHEET_BOX_COL_LETTER}{row_idx + 1}',
                 'values': [[str(ship_to_box[ship])]],
             })
         if updates:
             ws.batch_update(updates)
         return len(updates)
     except Exception:
-        return 0
+        return -1
 
 
 def pick_parse_box(box_str):
@@ -2288,6 +2296,49 @@ def _extract_manifest_info(pdf_bytes):
     return pages_info
 
 
+def _extract_manifest_products(pdf_bytes):
+    """매니페스트 PDF에서 박스별 상품 목록(상품번호/바코드) 추출.
+    상품 테이블 행은 'R<12~13자리 바코드> <6~10자리 SKU ID>' 패턴.
+    반환: [{'box_number', 'invoice_number', 'shipment_id',
+            'products': [{'barcode', 'sku_id'}, ...]}]
+    """
+    pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
+    boxes = []
+    current = None
+    for _, page in enumerate(pdf.pages):
+        text = page.extract_text() or ''
+        box_match = re.search(r'박스\s*(\d+-\d+)', text)
+        if box_match:
+            if current:
+                boxes.append(current)
+            invoice_match = re.search(r'송장번호\s*\n?\s*(\d{12,})', text)
+            if not invoice_match:
+                invoice_match = re.search(r'(4\d{11})', text)
+            shipment_id_match = re.search(r'쉽먼트\s*번호\s*\n\s*(\d{7,10})\b', text)
+            if not shipment_id_match:
+                shipment_id_match = re.search(r'쉽먼트\s*번호[\s:]+(\d{7,10})\b', text)
+            if not shipment_id_match:
+                shipment_id_match = re.search(r'쉽먼트\s*번호.{0,50}?\b(\d{7,10})\b', text, re.DOTALL)
+            current = {
+                'box_number': box_match.group(1),
+                'invoice_number': invoice_match.group(1) if invoice_match else None,
+                'shipment_id': shipment_id_match.group(1) if shipment_id_match else None,
+                'products': [],
+            }
+        if current is None:
+            continue
+        # 상품 테이블 행 (제품 바코드 + 상품번호)
+        for m in re.finditer(r'(R\d{12,13})\s+(\d{6,10})\b', text):
+            current['products'].append({
+                'barcode': m.group(1),
+                'sku_id': m.group(2),
+            })
+    if current:
+        boxes.append(current)
+    pdf.close()
+    return boxes
+
+
 def _extract_label_info(pdf_bytes):
     """라벨(동봉문서) PDF 바이트에서 박스/송장/쉽먼트번호 정보 추출"""
     pdf = pdfplumber.open(io.BytesIO(pdf_bytes))
@@ -2973,15 +3024,15 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
 
     # 신규 부여된 박스번호를 시트 M열에 기록
     new_box_only = {}
+    sheet_write_result = None  # None: 시도 안 함 / >=0: 기록된 셀 수 / -1: API 실패
     if existing_box_map is not None:
         new_box_only = {s: n for s, n in rp_ship_to_box_num.items()
                         if s not in existing_box_map}
         if write_new_to_sheet and new_box_only and sheet_client and sheet_url and sheet_tab:
-            try:
-                pick_write_box_numbers(sheet_client, sheet_url, sheet_tab,
-                                       new_box_only, only_empty=True)
-            except Exception:
-                pass
+            sheet_write_result = pick_write_box_numbers(
+                sheet_client, sheet_url, sheet_tab,
+                new_box_only, only_empty=True,
+            )
 
     rp_so_by_invoice = {}
     for inv_num in sorted(matched):
@@ -3076,6 +3127,7 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
         'not_in_csv': sorted(not_in_csv),
         'ship_to_box_num': rp_ship_to_box_num,
         'new_box_only': new_box_only,
+        'sheet_write_result': sheet_write_result,
         'timestamp': datetime.now().strftime('%Y%m%d_%H%M'),
     }
 
@@ -3114,6 +3166,7 @@ with tab7:
         rp_csv = None
         rp_manifest_files = []  # [(파일명, 파일)]
         rp_label_files = []     # [(파일명, 파일)]
+        rp_unknown_files = []   # 이름 패턴 불일치로 무시된 파일
 
         for f in reprint_files:
             fname = f.name.lower()
@@ -3123,6 +3176,14 @@ with tab7:
                 rp_manifest_files.append((f.name, f))
             elif 'label' in fname:
                 rp_label_files.append((f.name, f))
+            else:
+                rp_unknown_files.append(f.name)
+
+        if rp_unknown_files:
+            st.warning(
+                f'⚠️ 파일명에 `manifest`/`label`이 없어 무시된 파일 {len(rp_unknown_files)}개: '
+                + ', '.join(f'`{n}`' for n in rp_unknown_files)
+            )
 
         st.markdown(f'**분류 결과:**')
         if _use_sheet_source:
@@ -3158,16 +3219,20 @@ with tab7:
                         else:
                             rp_items = _parse_csv_bytes(file_bytes)
 
-                    # 시트 모드면 M열(기존값) 읽어 보존
+                    # 시트 모드면 M열(기존값) 읽어 보존. 읽기 실패 시 경고 후 중단.
                     _existing_map = None
                     if _use_sheet_source:
                         _existing_map = dict(st.session_state.get('pick_ship_to_box') or {})
                         if not _existing_map and st.session_state.get('pick_gsheet_client'):
-                            _existing_map = pick_read_box_numbers(
+                            _read = pick_read_box_numbers(
                                 st.session_state.pick_gsheet_client,
                                 st.session_state.get('pick_sheet_url_출고', ''),
                                 st.session_state.get('pick_sheet_tab_출고', ''),
                             )
+                            if _read is None:
+                                st.error('❌ 시트 M열 읽기 실패. 새로고침 후 다시 시도하세요.')
+                                st.stop()
+                            _existing_map = _read
 
                     result = _run_reprint_pipeline(
                         rp_items, rp_manifest_files, rp_label_files,
@@ -3187,6 +3252,8 @@ with tab7:
                     # 시트 세션 캐시 업데이트
                     if _use_sheet_source and result.get('ship_to_box_num'):
                         st.session_state['pick_ship_to_box'] = result['ship_to_box_num']
+                    if result.get('sheet_write_result') == -1:
+                        st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다. 다시 시도하세요.')
 
                     col_m1, col_m2, col_m3 = st.columns(3)
                     with col_m1:
@@ -3378,7 +3445,7 @@ with tab8:
     # ── 출고지시서 재출력 (피킹 시작 전에 박스번호 부여 + M열 기록) ──
     st.divider()
     with st.expander("📄 출고지시서 재출력 (쉽먼트/라벨 PDF 업로드 → 박스번호 부여)", expanded=False):
-        st.caption("피킹 시작 전에 쉽먼트/라벨 PDF를 업로드하면, 현재 시트 송장과 매칭해 출고지시서 PDF를 만들고 박스번호를 시트 M열에 저장합니다. 기존에 M열에 값이 있으면 그대로 유지(발주 취소 내성).")
+        st.caption("피킹 시작 전에 쉽먼트/라벨 PDF를 업로드하면, 현재 시트 송장과 매칭해 출고지시서 PDF를 만들고 박스번호를 시트 M열에 저장합니다. 기존에 M열에 값이 있으면 그대로 유지(발주 취소 내성). ⚠️ 동일 시트를 여러 사용자가 동시에 재출력하지 마세요 — 박스번호 충돌 가능.")
 
         pick_reprint_files = st.file_uploader(
             '매니페스트/라벨 PDF (파일명에 manifest/label 포함)',
@@ -3390,12 +3457,21 @@ with tab8:
         if pick_reprint_files:
             pk_manifest_files = []
             pk_label_files = []
+            pk_unknown_files = []
             for f in pick_reprint_files:
                 fname = f.name.lower()
                 if 'manifest' in fname:
                     pk_manifest_files.append((f.name, f))
                 elif 'label' in fname:
                     pk_label_files.append((f.name, f))
+                else:
+                    pk_unknown_files.append(f.name)
+
+            if pk_unknown_files:
+                st.warning(
+                    f'⚠️ 파일명에 `manifest`/`label`이 없어 무시된 파일 {len(pk_unknown_files)}개: '
+                    + ', '.join(f'`{n}`' for n in pk_unknown_files)
+                )
 
             st.markdown(f'- 매니페스트 PDF: **{len(pk_manifest_files)}개** / 라벨 PDF: **{len(pk_label_files)}개**')
 
@@ -3410,11 +3486,15 @@ with tab8:
                     if (not _pk_existing
                             and st.session_state.get('pick_gsheet_client')
                             and st.session_state.get('pick_sheet_url_출고')):
-                        _pk_existing = pick_read_box_numbers(
+                        _pk_read = pick_read_box_numbers(
                             st.session_state.pick_gsheet_client,
                             st.session_state.pick_sheet_url_출고,
                             st.session_state.pick_sheet_tab_출고,
                         )
+                        if _pk_read is None:
+                            st.error('❌ 시트 M열 읽기 실패. 새로고침 후 다시 시도하세요.')
+                            st.stop()
+                        _pk_existing = _pk_read
 
                     _pk_result = _run_reprint_pipeline(
                         _pk_items, pk_manifest_files, pk_label_files,
@@ -3432,6 +3512,8 @@ with tab8:
                     else:
                         if _pk_result.get('ship_to_box_num'):
                             st.session_state['pick_ship_to_box'] = _pk_result['ship_to_box_num']
+                        if _pk_result.get('sheet_write_result') == -1:
+                            st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다.')
                         _n_new = len(_pk_result.get('new_box_only') or {})
                         _n_reuse = _pk_result['matched'] - _n_new
                         st.success(
@@ -3506,6 +3588,156 @@ with tab8:
                     key='pick_reprint_dl_so',
                     use_container_width=True,
                 )
+
+    # ── 시트 송장-상품 ↔ 동봉문서(매니페스트) 일치 검증 ──
+    # 출고확인 시트는 사용자가 직접 송장을 분류해서 만든 것이라 송장에 엉뚱한 상품이
+    # 들어갈 수 있음. 동봉문서(=쉽먼트의 정답)와 대조해서 잘못 분류된 상품을 찾음.
+    st.divider()
+    with st.expander("🔍 시트 송장-상품 ↔ 동봉문서 일치 검증", expanded=False):
+        st.caption(
+            "출고확인 시트의 송장-상품 매핑이 실제 매니페스트(동봉문서)와 일치하는지 검증합니다. "
+            "**시트 상품 중 매니페스트에 없는 것은 🚨 오분류(엉뚱한 송장에 배정)**. "
+            "매니페스트에 있는데 시트에 없는 것은 아직 도착 안 한 상품일 수 있어 참고용."
+        )
+
+        _df_pick = st.session_state.pick_df_출고
+        _sku_col = None
+        for _c in _df_pick.columns:
+            _cn = str(_c).strip().upper().replace(' ', '')
+            if _cn in ('SKUID', 'SKU_ID', 'SKU'):
+                _sku_col = _c
+                break
+        if _sku_col is None:
+            st.warning('⚠️ 시트에 `SKU ID` 컬럼(E열)이 없습니다. 시트 헤더를 확인하세요.')
+        else:
+            verify_files = st.file_uploader(
+                '매니페스트 PDF (여러 개 가능)',
+                type=['pdf'],
+                accept_multiple_files=True,
+                key='verify_manifest_files',
+            )
+
+            if verify_files and st.button('🔍 검증 시작', type='primary', key='verify_btn'):
+                with st.spinner(f'매니페스트 {len(verify_files)}개 파싱 중...'):
+                    _all_boxes = []
+                    _parse_errors = []
+                    for f in verify_files:
+                        try:
+                            _b = f.read(); f.seek(0)
+                            _all_boxes.extend(_extract_manifest_products(_b))
+                        except Exception as e:
+                            _parse_errors.append((f.name, str(e)))
+
+                if _parse_errors:
+                    for _n, _e in _parse_errors:
+                        st.error(f'❌ `{_n}` 파싱 실패: {_e}')
+
+                # 송장별 SKU 집계 (매니페스트 = 정답)
+                _manifest_skus = {}   # {invoice: {sku_id}}
+                _manifest_box_count = {}
+                for _box in _all_boxes:
+                    _inv = _box.get('invoice_number')
+                    if not _inv:
+                        continue
+                    _manifest_skus.setdefault(_inv, set()).update(
+                        p['sku_id'] for p in _box['products']
+                    )
+                    _manifest_box_count[_inv] = _manifest_box_count.get(_inv, 0) + 1
+
+                # 송장별 SKU 집계 (시트 = 검증 대상)
+                def _norm_sku(v):
+                    s = str(v or '').strip()
+                    if not s:
+                        return ''
+                    try:
+                        return str(int(float(s)))  # "71572440.0" → "71572440"
+                    except (ValueError, TypeError):
+                        return s
+
+                _sheet_skus = {}
+                for _, _row in _df_pick.iterrows():
+                    _inv = str(_row.get('쉽먼트운송장번호', '') or '').strip()
+                    _sku = _norm_sku(_row.get(_sku_col))
+                    if not _inv or not _sku:
+                        continue
+                    _sheet_skus.setdefault(_inv, set()).add(_sku)
+
+                # 비교 — 시트 기준으로 검증 (시트의 SKU가 매니페스트에 있는가?)
+                _issues = []            # 오분류 있는 송장
+                _sheet_only_inv = set(_sheet_skus.keys()) - set(_manifest_skus.keys())
+                _clean_count = 0
+                for _inv, _ssk in _sheet_skus.items():
+                    _msk = _manifest_skus.get(_inv, set())
+                    if not _msk:  # 매니페스트 자체가 없는 송장 → 별도 처리
+                        continue
+                    _wrong = _ssk - _msk   # 🚨 시트에만 있음 = 오분류
+                    _missing = _msk - _ssk  # ℹ️ 매니페스트에만 있음 = 미도착 또는 참고
+                    if not _wrong:
+                        _clean_count += 1
+                    else:
+                        _issues.append({
+                            'invoice': _inv,
+                            'n_sheet': len(_ssk),
+                            'n_manifest': len(_msk),
+                            'wrong_in_sheet': sorted(_wrong),
+                            'missing_vs_manifest': sorted(_missing),
+                            'n_boxes': _manifest_box_count.get(_inv, 0),
+                        })
+
+                # 전체 결과
+                _total_sheet_inv = len(_sheet_skus)
+                _matched_inv = len(set(_sheet_skus.keys()) & set(_manifest_skus.keys()))
+
+                st.markdown('### 검증 결과')
+                _c1, _c2, _c3, _c4 = st.columns(4)
+                with _c1:
+                    st.metric('시트 송장', f'{_total_sheet_inv}건')
+                with _c2:
+                    st.metric('송장 매칭', f'{_matched_inv}건',
+                              help='시트 송장 중 매니페스트에도 존재하는 송장 수')
+                with _c3:
+                    st.metric('🚨 오분류 송장', f'{len(_issues)}건',
+                              help='시트에 매니페스트에 없는 상품이 배정된 송장')
+                with _c4:
+                    st.metric('매니페스트 없음', f'{len(_sheet_only_inv)}건',
+                              help='시트엔 있지만 업로드한 매니페스트에 송장 자체가 없음')
+
+                if len(_issues) == 0 and _sheet_only_inv == set():
+                    st.success(f'✅ 완전 일치 — 시트 송장 {_total_sheet_inv}건 모두 매니페스트와 SKU 일치')
+                else:
+                    if _sheet_only_inv:
+                        with st.expander(f'ℹ️ 매니페스트에 없는 송장 ({len(_sheet_only_inv)}건) — 매니페스트 PDF 추가 업로드 필요할 수도'):
+                            st.code('\n'.join(sorted(_sheet_only_inv)))
+
+                    if _issues:
+                        st.error(f'🚨 오분류 발견 — {len(_issues)}개 송장에 매니페스트에 없는 상품이 배정되어 있음. 시트에서 해당 행의 송장번호를 올바르게 수정하세요.')
+                        _rows = []
+                        for _it in _issues:
+                            _rows.append({
+                                '송장번호': _it['invoice'],
+                                '🚨 오분류 SKU': len(_it['wrong_in_sheet']),
+                                '시트 SKU 총': _it['n_sheet'],
+                                '매니페스트 SKU 총': _it['n_manifest'],
+                                '미도착 가능': len(_it['missing_vs_manifest']),
+                                '박스 수': _it['n_boxes'],
+                            })
+                        import pandas as _pdv
+                        st.dataframe(_pdv.DataFrame(_rows),
+                                     use_container_width=True, hide_index=True)
+
+                        for _it in _issues:
+                            with st.expander(f"🚨 송장 {_it['invoice']} — 오분류 {len(_it['wrong_in_sheet'])}개"):
+                                st.error(
+                                    f"**시트에 잘못 배정된 SKU ({len(_it['wrong_in_sheet'])}개)** — "
+                                    f"이 송장의 매니페스트에 없는 상품임:\n\n"
+                                    + ', '.join(f'`{s}`' for s in _it['wrong_in_sheet'])
+                                )
+                                if _it['missing_vs_manifest']:
+                                    st.info(
+                                        f"참고: 매니페스트엔 있는데 시트에 없는 SKU ({len(_it['missing_vs_manifest'])}개) — "
+                                        f"아직 도착 안 했을 수 있음:\n\n"
+                                        + ', '.join(f'`{s}`' for s in _it['missing_vs_manifest'])
+                                    )
 
     # ── 모드 토글 (피킹 검증 ↔ 입고 분류) ──
     st.divider()
@@ -4012,30 +4244,36 @@ with tab8:
             })
 
         # 1) 시트 M열에서 기존 박스번호 읽기 (gsheet 모드 + 세션 캐시)
+        #    실패(None) 시 캐시 저장 안 함 → 다음 rerun에서 재시도
         _pick_url = st.session_state.get('pick_sheet_url_출고', '')
         _pick_tab = st.session_state.get('pick_sheet_tab_출고', '')
         _existing_box_map = {}
-        if (st.session_state.get('pick_use_gsheet')
-                and st.session_state.get('pick_gsheet_client')
-                and _pick_url and _pick_tab):
+        _read_failed = False
+        _gsheet_ready = (st.session_state.get('pick_use_gsheet')
+                         and st.session_state.get('pick_gsheet_client')
+                         and _pick_url and _pick_tab)
+        if _gsheet_ready:
             _cache_key = f"_pick_existing_box_{_pick_url}_{_pick_tab}"
             if _cache_key in st.session_state:
                 _existing_box_map = st.session_state[_cache_key]
             else:
-                _existing_box_map = pick_read_box_numbers(
+                _read = pick_read_box_numbers(
                     st.session_state.pick_gsheet_client, _pick_url, _pick_tab
                 )
-                st.session_state[_cache_key] = _existing_box_map
+                if _read is None:
+                    _read_failed = True
+                    st.warning('⚠️ 시트 M열 읽기 실패 — 이번 세션에서 박스번호 쓰기는 건너뜁니다. 페이지를 새로고침하세요.')
+                else:
+                    _existing_box_map = _read
+                    st.session_state[_cache_key] = _read
 
         # 2) 기존 유지 + 신규 송장만 순차 부여
         sort_ship_to_box = assign_box_numbers_with_existing(
             sort_items_for_box, _existing_box_map
         )
 
-        # 3) 신규 부여된 것만 시트 M열에 기록 (백그라운드, 기존값 보존)
-        if (st.session_state.get('pick_use_gsheet')
-                and st.session_state.get('pick_gsheet_client')
-                and _pick_url and _pick_tab):
+        # 3) 신규 부여된 것만 시트 M열에 동기 기록 (기존값 보존, 실패 시 캐시 갱신 안 함)
+        if _gsheet_ready and not _read_failed:
             _new_only = {s: n for s, n in sort_ship_to_box.items()
                          if s not in _existing_box_map}
             _written_key = f"_pick_box_written_{_pick_url}_{_pick_tab}"
@@ -4043,22 +4281,20 @@ with tab8:
             _to_write = {s: n for s, n in _new_only.items()
                          if _last_written.get(s) != n}
             if _to_write:
-                import threading
-                _client = st.session_state.pick_gsheet_client
-                _updates_new = dict(_to_write)
-                def _bg_write_box():
-                    try:
-                        pick_write_box_numbers(_client, _pick_url, _pick_tab,
-                                               _updates_new, only_empty=True)
-                    except Exception:
-                        pass
-                threading.Thread(target=_bg_write_box, daemon=True).start()
-                # 세션 캐시 갱신 — 다음 rerun에서 중복 기록 방지
-                _merged = dict(_existing_box_map)
-                _merged.update(_new_only)
-                st.session_state[_cache_key] = _merged
-                _last_written.update(_to_write)
-                st.session_state[_written_key] = _last_written
+                with st.spinner(f'📝 시트 M열에 박스번호 {len(_to_write)}건 기록 중...'):
+                    _result = pick_write_box_numbers(
+                        st.session_state.pick_gsheet_client,
+                        _pick_url, _pick_tab, _to_write, only_empty=True,
+                    )
+                if _result >= 0:
+                    # 성공 시에만 캐시 갱신
+                    _merged = dict(_existing_box_map)
+                    _merged.update(_new_only)
+                    st.session_state[_cache_key] = _merged
+                    _last_written.update(_to_write)
+                    st.session_state[_written_key] = _last_written
+                else:
+                    st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다. 다음 rerun에서 재시도됩니다.')
 
         # 쉽먼트 재출력 탭에서 재사용하도록 세션에 저장
         st.session_state['pick_ship_to_box'] = sort_ship_to_box
