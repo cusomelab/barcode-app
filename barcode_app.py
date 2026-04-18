@@ -3252,6 +3252,13 @@ with tab7:
                     # 시트 세션 캐시 업데이트
                     if _use_sheet_source and result.get('ship_to_box_num'):
                         st.session_state['pick_ship_to_box'] = result['ship_to_box_num']
+                        # 피킹&분류 입고분류 모드가 새 박스번호를 바로 반영하도록 캐시 동기화
+                        _sync_url = st.session_state.get('pick_sheet_url_출고', '')
+                        _sync_tab = st.session_state.get('pick_sheet_tab_출고', '')
+                        if _sync_url and _sync_tab:
+                            st.session_state[f"_pick_existing_box_{_sync_url}_{_sync_tab}"] = dict(
+                                result['ship_to_box_num']
+                            )
                     if result.get('sheet_write_result') == -1:
                         st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다. 다시 시도하세요.')
 
@@ -3512,6 +3519,13 @@ with tab8:
                     else:
                         if _pk_result.get('ship_to_box_num'):
                             st.session_state['pick_ship_to_box'] = _pk_result['ship_to_box_num']
+                            # 입고분류 모드가 새 박스번호를 바로 반영하도록 캐시 동기화
+                            _sync_url = st.session_state.get('pick_sheet_url_출고', '')
+                            _sync_tab = st.session_state.get('pick_sheet_tab_출고', '')
+                            if _sync_url and _sync_tab:
+                                st.session_state[f"_pick_existing_box_{_sync_url}_{_sync_tab}"] = dict(
+                                    _pk_result['ship_to_box_num']
+                                )
                         if _pk_result.get('sheet_write_result') == -1:
                             st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다.')
                         _n_new = len(_pk_result.get('new_box_only') or {})
