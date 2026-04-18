@@ -3589,10 +3589,16 @@ with tab8:
                     use_container_width=True,
                 )
 
-    # ── 동봉문서(매니페스트) ↔ 시트 E열(SKU ID) 검증 ──
+    # ── 시트 송장-상품 ↔ 동봉문서(매니페스트) 일치 검증 ──
+    # 출고확인 시트는 사용자가 직접 송장을 분류해서 만든 것이라 송장에 엉뚱한 상품이
+    # 들어갈 수 있음. 동봉문서(=쉽먼트의 정답)와 대조해서 잘못 분류된 상품을 찾음.
     st.divider()
-    with st.expander("🔍 동봉문서 ↔ 시트 SKU 검증", expanded=False):
-        st.caption("매니페스트 PDF를 업로드하면 송장별로 매니페스트의 상품번호가 시트 E열(SKU ID)에 모두 있는지 비교합니다. 누락된 SKU는 해당 송장의 상품이 시트에 반영되지 않았다는 뜻.")
+    with st.expander("🔍 시트 송장-상품 ↔ 동봉문서 일치 검증", expanded=False):
+        st.caption(
+            "출고확인 시트의 송장-상품 매핑이 실제 매니페스트(동봉문서)와 일치하는지 검증합니다. "
+            "**시트 상품 중 매니페스트에 없는 것은 🚨 오분류(엉뚱한 송장에 배정)**. "
+            "매니페스트에 있는데 시트에 없는 것은 아직 도착 안 한 상품일 수 있어 참고용."
+        )
 
         _df_pick = st.session_state.pick_df_출고
         _sku_col = None
@@ -3626,9 +3632,9 @@ with tab8:
                     for _n, _e in _parse_errors:
                         st.error(f'❌ `{_n}` 파싱 실패: {_e}')
 
-                # 송장별 SKU 집계 (매니페스트)
+                # 송장별 SKU 집계 (매니페스트 = 정답)
                 _manifest_skus = {}   # {invoice: {sku_id}}
-                _manifest_box_count = {}  # {invoice: n_boxes}
+                _manifest_box_count = {}
                 for _box in _all_boxes:
                     _inv = _box.get('invoice_number')
                     if not _inv:
@@ -3638,7 +3644,7 @@ with tab8:
                     )
                     _manifest_box_count[_inv] = _manifest_box_count.get(_inv, 0) + 1
 
-                # 송장별 SKU 집계 (시트 E열)
+                # 송장별 SKU 집계 (시트 = 검증 대상)
                 def _norm_sku(v):
                     s = str(v or '').strip()
                     if not s:
@@ -3656,56 +3662,63 @@ with tab8:
                         continue
                     _sheet_skus.setdefault(_inv, set()).add(_sku)
 
-                # 비교
-                _issues = []
-                _matched_shipments = 0
-                for _inv, _msk in _manifest_skus.items():
-                    _ssk = _sheet_skus.get(_inv, set())
-                    _missing = _msk - _ssk
-                    _extra = _ssk - _msk
-                    if not _missing and not _extra:
-                        _matched_shipments += 1
+                # 비교 — 시트 기준으로 검증 (시트의 SKU가 매니페스트에 있는가?)
+                _issues = []            # 오분류 있는 송장
+                _sheet_only_inv = set(_sheet_skus.keys()) - set(_manifest_skus.keys())
+                _clean_count = 0
+                for _inv, _ssk in _sheet_skus.items():
+                    _msk = _manifest_skus.get(_inv, set())
+                    if not _msk:  # 매니페스트 자체가 없는 송장 → 별도 처리
+                        continue
+                    _wrong = _ssk - _msk   # 🚨 시트에만 있음 = 오분류
+                    _missing = _msk - _ssk  # ℹ️ 매니페스트에만 있음 = 미도착 또는 참고
+                    if not _wrong:
+                        _clean_count += 1
                     else:
                         _issues.append({
                             'invoice': _inv,
-                            'n_manifest': len(_msk),
                             'n_sheet': len(_ssk),
-                            'missing_in_sheet': sorted(_missing),
-                            'extra_in_sheet': sorted(_extra),
+                            'n_manifest': len(_msk),
+                            'wrong_in_sheet': sorted(_wrong),
+                            'missing_vs_manifest': sorted(_missing),
                             'n_boxes': _manifest_box_count.get(_inv, 0),
                         })
 
-                _pdf_only_invoices = set(_manifest_skus.keys()) - set(_sheet_skus.keys())
-                _sheet_only_invoices = set(_sheet_skus.keys()) - set(_manifest_skus.keys())
+                # 전체 결과
+                _total_sheet_inv = len(_sheet_skus)
+                _matched_inv = len(set(_sheet_skus.keys()) & set(_manifest_skus.keys()))
 
                 st.markdown('### 검증 결과')
                 _c1, _c2, _c3, _c4 = st.columns(4)
                 with _c1:
-                    st.metric('매니페스트 송장', f'{len(_manifest_skus)}건')
+                    st.metric('시트 송장', f'{_total_sheet_inv}건')
                 with _c2:
-                    st.metric('완전 일치', f'{_matched_shipments}건')
+                    st.metric('송장 매칭', f'{_matched_inv}건',
+                              help='시트 송장 중 매니페스트에도 존재하는 송장 수')
                 with _c3:
-                    st.metric('SKU 불일치', f'{len(_issues)}건',
-                              delta=None if not _issues else '문제')
+                    st.metric('🚨 오분류 송장', f'{len(_issues)}건',
+                              help='시트에 매니페스트에 없는 상품이 배정된 송장')
                 with _c4:
-                    st.metric('송장 자체 없음', f'{len(_pdf_only_invoices)}건')
+                    st.metric('매니페스트 없음', f'{len(_sheet_only_inv)}건',
+                              help='시트엔 있지만 업로드한 매니페스트에 송장 자체가 없음')
 
-                if not _issues and not _pdf_only_invoices:
-                    st.success(f'✅ 완전 일치 — 매니페스트 송장 {len(_manifest_skus)}건 모든 SKU가 시트에 존재')
+                if len(_issues) == 0 and _sheet_only_inv == set():
+                    st.success(f'✅ 완전 일치 — 시트 송장 {_total_sheet_inv}건 모두 매니페스트와 SKU 일치')
                 else:
-                    if _pdf_only_invoices:
-                        with st.expander(f'🚨 시트에 송장 자체가 없음 ({len(_pdf_only_invoices)}건)'):
-                            st.code('\n'.join(sorted(_pdf_only_invoices)))
+                    if _sheet_only_inv:
+                        with st.expander(f'ℹ️ 매니페스트에 없는 송장 ({len(_sheet_only_inv)}건) — 매니페스트 PDF 추가 업로드 필요할 수도'):
+                            st.code('\n'.join(sorted(_sheet_only_inv)))
 
                     if _issues:
+                        st.error(f'🚨 오분류 발견 — {len(_issues)}개 송장에 매니페스트에 없는 상품이 배정되어 있음. 시트에서 해당 행의 송장번호를 올바르게 수정하세요.')
                         _rows = []
                         for _it in _issues:
                             _rows.append({
                                 '송장번호': _it['invoice'],
-                                '매니페스트 SKU': _it['n_manifest'],
-                                '시트 SKU': _it['n_sheet'],
-                                '시트 누락': len(_it['missing_in_sheet']),
-                                '시트 초과': len(_it['extra_in_sheet']),
+                                '🚨 오분류 SKU': len(_it['wrong_in_sheet']),
+                                '시트 SKU 총': _it['n_sheet'],
+                                '매니페스트 SKU 총': _it['n_manifest'],
+                                '미도착 가능': len(_it['missing_vs_manifest']),
                                 '박스 수': _it['n_boxes'],
                             })
                         import pandas as _pdv
@@ -3713,21 +3726,18 @@ with tab8:
                                      use_container_width=True, hide_index=True)
 
                         for _it in _issues:
-                            with st.expander(f"🚨 송장 {_it['invoice']} — 누락 {len(_it['missing_in_sheet'])}개 / 초과 {len(_it['extra_in_sheet'])}개"):
-                                if _it['missing_in_sheet']:
-                                    st.error(
-                                        f"**시트에 없는 SKU ({len(_it['missing_in_sheet'])}개)** — 매니페스트엔 있지만 출고확인에 반영 안 됨:\n\n"
-                                        + ', '.join(f'`{s}`' for s in _it['missing_in_sheet'])
-                                    )
-                                if _it['extra_in_sheet']:
+                            with st.expander(f"🚨 송장 {_it['invoice']} — 오분류 {len(_it['wrong_in_sheet'])}개"):
+                                st.error(
+                                    f"**시트에 잘못 배정된 SKU ({len(_it['wrong_in_sheet'])}개)** — "
+                                    f"이 송장의 매니페스트에 없는 상품임:\n\n"
+                                    + ', '.join(f'`{s}`' for s in _it['wrong_in_sheet'])
+                                )
+                                if _it['missing_vs_manifest']:
                                     st.info(
-                                        f"**매니페스트에 없는 SKU ({len(_it['extra_in_sheet'])}개)** — 시트에만 있음:\n\n"
-                                        + ', '.join(f'`{s}`' for s in _it['extra_in_sheet'])
+                                        f"참고: 매니페스트엔 있는데 시트에 없는 SKU ({len(_it['missing_vs_manifest'])}개) — "
+                                        f"아직 도착 안 했을 수 있음:\n\n"
+                                        + ', '.join(f'`{s}`' for s in _it['missing_vs_manifest'])
                                     )
-
-                    if _sheet_only_invoices:
-                        with st.expander(f'ℹ️ 매니페스트에 송장이 없음 ({len(_sheet_only_invoices)}건) — 이번 출력에 포함 안 됨'):
-                            st.code('\n'.join(sorted(_sheet_only_invoices)))
 
     # ── 모드 토글 (피킹 검증 ↔ 입고 분류) ──
     st.divider()
