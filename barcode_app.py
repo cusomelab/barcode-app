@@ -1160,6 +1160,76 @@ def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=
         return -1
 
 
+def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
+    """등록상품정보 시트에서 바코드(D열, index 3) 매칭 후 재고/위치 업데이트.
+    - AB열(index 27): 기존 재고 + qty 누적
+    - AC열(index 28): 위치 추가 (중복이면 스킵, 여러 위치는 ", " 구분)
+    - C열(index 2): 상품명 반환용
+    반환: dict {ok: bool, name: str, new_stock: int, error: str}
+    """
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+    except Exception as e:
+        return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'시트 열기 실패: {e}'}
+    if len(all_values) < 2:
+        return {'ok': False, 'name': '', 'new_stock': 0, 'error': '시트가 비어있음'}
+
+    _BC_COL = 3       # D열
+    _NAME_COL = 2     # C열
+    _STOCK_COL = 27   # AB열 (28번째)
+    _LOC_COL = 28     # AC열 (29번째)
+
+    try:
+        qty_int = int(qty)
+    except (ValueError, TypeError):
+        qty_int = 1
+    if qty_int <= 0:
+        return {'ok': False, 'name': '', 'new_stock': 0, 'error': '수량은 1 이상이어야 함'}
+
+    for row_idx in range(1, len(all_values)):
+        row = all_values[row_idx]
+        if len(row) <= _BC_COL:
+            continue
+        if str(row[_BC_COL]).strip() != str(barcode).strip():
+            continue
+
+        # AB열 기존 재고 + qty
+        prev_raw = row[_STOCK_COL] if len(row) > _STOCK_COL else ''
+        try:
+            prev = int(float(str(prev_raw).strip() or '0'))
+        except (ValueError, TypeError):
+            prev = 0
+        new_stock = prev + qty_int
+
+        # AC열 위치 (중복 방지)
+        existing_loc = str(row[_LOC_COL]).strip() if len(row) > _LOC_COL else ''
+        loc_new = str(location or '').strip()
+        if loc_new:
+            if not existing_loc:
+                updated_loc = loc_new
+            else:
+                parts = [s.strip() for s in existing_loc.split(',') if s.strip()]
+                if loc_new not in parts:
+                    parts.append(loc_new)
+                updated_loc = ', '.join(parts)
+        else:
+            updated_loc = existing_loc
+
+        try:
+            ws.update_cell(row_idx + 1, _STOCK_COL + 1, new_stock)
+            if loc_new and updated_loc != existing_loc:
+                ws.update_cell(row_idx + 1, _LOC_COL + 1, updated_loc)
+        except Exception as e:
+            return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'쓰기 실패: {e}'}
+
+        name = str(row[_NAME_COL]).strip() if len(row) > _NAME_COL else ''
+        return {'ok': True, 'name': name, 'new_stock': new_stock, 'error': ''}
+    return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'미등록 바코드: {barcode}'}
+
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -1511,7 +1581,20 @@ def pick_get_progress():
     return {"total":total,"scanned":scanned,"skus":skus,"done_skus":done_skus,
             "pct":pct,"is_complete":scanned>=total,"over":over,"shortage":shortage}
 
-tab1, tab2, tab6, tab7, tab8, tab3, tab4, tab5 = st.tabs(['📦 소형 라벨', '📋 대형 라벨 (90도 회전)', '🚛 쉽먼트 통합', '🔄 쉽먼트 재출력', '📦 피킹 & 분류', '📄 출고 작업 지시서 PDF', '📎 PDF 병합', '📝 발주중단 공문'])
+tab1, tab2, tab_shipment, tab8, tab_stock, tab3, tab4, tab5 = st.tabs([
+    '📦 소형 라벨',
+    '📋 대형 라벨 (90도 회전)',
+    '🚛 쉽먼트 관리',
+    '📦 피킹 & 분류',
+    '📥 재고 확인',
+    '📄 출고 작업 지시서 PDF',
+    '📎 PDF 병합',
+    '📝 발주중단 공문',
+])
+
+# 쉽먼트 관리 탭 안에 "통합 관리"와 "재출력"을 서브탭으로 구성
+with tab_shipment:
+    tab6, tab7 = st.tabs(['🚛 쉽먼트 통합 관리', '🔄 쉽먼트 재출력'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
@@ -1593,6 +1676,198 @@ with tab2:
             fname = l_file.name.replace('.xlsx','_완성.xlsx')
             st.download_button('⬇️ 완성 파일 다운로드', output, file_name=fname,
                              mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+# ── 재고 확인(반출 재고 채우기) 탭 ──────────────────────────
+with tab_stock:
+    st.header('📥 반출 재고 채우기')
+    st.caption('위치를 먼저 지정하고 바코드를 스캔하면 등록상품정보 시트의 AB열(국내재고)에 누적, AC열에 위치 기록')
+
+    _STOCK_SHEET_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=0#gid=0"
+    _STOCK_SHEET_TAB = "등록상품정보"
+
+    # 세션 초기화
+    for _k, _v in [
+        ('stock_location', ''),
+        ('stock_scan_log', []),
+        ('stock_next_qty', 1),
+        ('stock_qty_input_mode', False),
+        ('stock_scan_counter', 0),
+        ('stock_last_result', None),
+    ]:
+        if _k not in st.session_state:
+            st.session_state[_k] = _v
+
+    # ── 시트 연결 ──
+    _sclient = st.session_state.get('pick_gsheet_client') or get_gsheet_client()
+    if _sclient is None:
+        st.error('❌ Google Sheets 인증 실패 — 서비스 계정 키를 확인하세요')
+        st.stop()
+    st.session_state['pick_gsheet_client'] = _sclient
+
+    _sinfo_c1, _sinfo_c2 = st.columns([3, 1])
+    with _sinfo_c1:
+        st.text_input('구글 시트', value=_STOCK_SHEET_URL, disabled=True, key='stock_url_display')
+    with _sinfo_c2:
+        st.text_input('탭 이름', value=_STOCK_SHEET_TAB, disabled=True, key='stock_tab_display')
+
+    # ── 1단계: 위치 입력 ──
+    st.divider()
+    st.markdown('### 📍 1단계: 담을 위치 지정')
+    _loc_c1, _loc_c2, _loc_c3 = st.columns([3, 1, 1])
+    with _loc_c1:
+        _loc_input = st.text_input(
+            '위치/박스 (예: G박스, A-1구역)',
+            value=st.session_state.stock_location,
+            key='stock_location_input',
+            placeholder='예: G박스, A-1구역',
+        )
+    with _loc_c2:
+        if st.button('✅ 위치 설정', use_container_width=True, key='stock_set_loc'):
+            _cleaned = _loc_input.strip()
+            if _cleaned:
+                st.session_state.stock_location = _cleaned
+                st.success(f'위치: {_cleaned}')
+                st.rerun()
+            else:
+                st.error('위치를 입력하세요')
+    with _loc_c3:
+        if st.button('🔄 위치 변경', use_container_width=True, key='stock_reset_loc'):
+            st.session_state.stock_location = ''
+            st.rerun()
+
+    if not st.session_state.stock_location:
+        st.info('👆 먼저 위치를 입력하고 "✅ 위치 설정"을 눌러주세요')
+        st.stop()
+
+    st.success(f'📍 현재 위치: **{st.session_state.stock_location}**')
+
+    # ── 2단계: 바코드 스캔 ──
+    st.divider()
+    st.markdown('### 🔍 2단계: 바코드 스캔')
+    if st.session_state.stock_qty_input_mode:
+        st.warning(f'🔢 다량 입력 모드 — 다음 스캔은 **{st.session_state.stock_next_qty}개**로 처리됩니다. `#MULTI` 다시 찍으면 해제.')
+    st.caption('💡 일반 스캔 = +1 / `#MULTI` 찍고 숫자 입력 후 바코드 = 그 수량만큼 +누적')
+
+    def _stock_process_scan(raw):
+        _now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        barcode = str(raw or '').strip()
+        if not barcode:
+            return None
+        # #MULTI 토글
+        if barcode.upper() == '#MULTI':
+            st.session_state.stock_qty_input_mode = not st.session_state.stock_qty_input_mode
+            if not st.session_state.stock_qty_input_mode:
+                st.session_state.stock_next_qty = 1
+            return {
+                'status': 'multi_trigger',
+                'message': '🔢 다량 입력 모드 ON' if st.session_state.stock_qty_input_mode else '1개 모드 복귀',
+                'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
+            }
+        # 숫자만 입력 + 다량 모드면 → next_qty 설정
+        if st.session_state.stock_qty_input_mode and barcode.isdigit():
+            n = int(barcode)
+            if n > 0:
+                st.session_state.stock_next_qty = n
+                return {
+                    'status': 'qty_set',
+                    'message': f'🔢 다음 스캔 수량 = {n}개',
+                    'barcode': barcode, 'name': '', 'qty': n, 'stock': 0, 'time': _now,
+                }
+        _qty = st.session_state.stock_next_qty if st.session_state.stock_qty_input_mode else 1
+        _res = stock_update_barcode(
+            _sclient, _STOCK_SHEET_URL, _STOCK_SHEET_TAB,
+            barcode, _qty, st.session_state.stock_location,
+        )
+        # 1회성 다량 모드 해제
+        if st.session_state.stock_qty_input_mode:
+            st.session_state.stock_next_qty = 1
+            st.session_state.stock_qty_input_mode = False
+        if _res['ok']:
+            return {
+                'status': 'ok',
+                'message': f"✅ [{_res['name'][:30]}] +{_qty} → 재고 {_res['new_stock']}",
+                'barcode': barcode, 'name': _res['name'], 'qty': _qty,
+                'stock': _res['new_stock'], 'time': _now,
+            }
+        else:
+            return {
+                'status': 'error',
+                'message': f"❌ {_res['error']}",
+                'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
+            }
+
+    # 바코드 input
+    _scan_key = f"stock_scan_{st.session_state.stock_scan_counter}"
+    _scan_val = st.text_input(
+        '바코드 입력',
+        key=_scan_key,
+        placeholder='바코드를 스캔하거나 #MULTI 입력...',
+    )
+    if _scan_val:
+        _result = _stock_process_scan(_scan_val)
+        if _result:
+            st.session_state.stock_last_result = _result
+            st.session_state.stock_scan_log.append(_result)
+        st.session_state.stock_scan_counter += 1
+        st.rerun()
+
+    # 최근 결과 크게 표시
+    _last = st.session_state.stock_last_result
+    if _last:
+        if _last['status'] == 'ok':
+            st.success(_last['message'])
+        elif _last['status'] == 'error':
+            st.error(_last['message'])
+        else:
+            st.info(_last['message'])
+
+    # ── 스캔 로그 ──
+    if st.session_state.stock_scan_log:
+        st.divider()
+        with st.expander(f"📜 스캔 로그 ({len(st.session_state.stock_scan_log)}건)", expanded=True):
+            import pandas as _pds
+            _log_rows = []
+            for e in reversed(st.session_state.stock_scan_log[-100:]):
+                _icon = {'ok': '✅', 'error': '❌', 'multi_trigger': '🔢', 'qty_set': '🔢'}.get(e['status'], '?')
+                _log_rows.append({
+                    '시간': e['time'][-8:],
+                    '결과': _icon,
+                    '바코드': e['barcode'],
+                    '수량': e['qty'] if e['qty'] else '',
+                    '누적재고': e['stock'] if e['stock'] else '',
+                    '상품명': e['name'][:40],
+                })
+            st.dataframe(_pds.DataFrame(_log_rows), use_container_width=True, hide_index=True)
+
+            if st.button('🗑️ 로그 초기화', key='stock_clear_log'):
+                st.session_state.stock_scan_log = []
+                st.session_state.stock_last_result = None
+                st.rerun()
+
+    # 자동 포커스 (스캐너 연사 대응)
+    from streamlit.components.v1 import html as _stock_html
+    _stock_html(f"""
+    <script>
+    (function(){{
+        const doc = window.parent.document;
+        function findScan(){{
+            const inputs = doc.querySelectorAll('input[type="text"]');
+            for (const inp of inputs){{
+                if (inp.placeholder && inp.placeholder.includes('#MULTI')) return inp;
+            }}
+            return null;
+        }}
+        function focusScan(){{
+            const inp = findScan();
+            if (inp) {{ inp.focus(); inp.select(); }}
+        }}
+        focusScan();
+        setTimeout(focusScan, 150);
+        setTimeout(focusScan, 400);
+    }})();
+    </script>
+    """, height=0)
+
 
 # ── 출고 작업 지시서 탭 ───────────────────────────────
 with tab3:
