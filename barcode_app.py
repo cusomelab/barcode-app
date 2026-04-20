@@ -1009,8 +1009,15 @@ def pick_append_log(client, sheet_url, log_entry):
     except Exception:
         return False
 
-def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1):
-    """배대지 시트의 실제 수량을 차감"""
+def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1, box_number=None):
+    """배대지 시트 스캔 수량 기록.
+    매칭: A열(박스번호, 0) + E열(바코드, 4) 둘 다 같은 행.
+    기록:
+      - U열(스캔수량, 20): 기존값에 decrement 만큼 누적
+      - V열(남은수량, 21): G열 수량 - U열 스캔수량 (안 온 상품 체크용)
+    G열(수량)은 건드리지 않음 — 원본 주문 수량으로 보존.
+    box_number 없으면 레거시 동작(바코드만 매칭) 유지.
+    """
     try:
         sheet_id = _extract_sheet_id(sheet_url)
         spreadsheet = client.open_by_key(sheet_id)
@@ -1018,27 +1025,41 @@ def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=
         all_values = ws.get_all_values()
         if len(all_values) < 2:
             return False
-        headers = all_values[0]
-        bc_col = None
-        qty_col = None
-        for i, h in enumerate(headers):
-            h_strip = str(h).strip()
-            if h_strip == "바코드":
-                bc_col = i
-            if h_strip == "수량":
-                qty_col = i
-        if bc_col is None or qty_col is None:
-            return False
+        _BOX_COL = 0   # A열
+        _BC_COL = 4    # E열 (바코드)
+        _QTY_COL = 6   # G열 (원본 수량)
+        _SCAN_COL = 20 # U열 (누적 스캔)
+        _REM_COL = 21  # V열 (남은 수량)
+
+        _norm_box = str(box_number or '').strip().upper()
         for row_idx in range(1, len(all_values)):
-            if str(all_values[row_idx][bc_col]).strip() == barcode:
-                current = all_values[row_idx][qty_col]
-                try:
-                    current_val = int(float(current))
-                except (ValueError, TypeError):
-                    current_val = 0
-                new_val = max(0, current_val - decrement)
-                ws.update_cell(row_idx + 1, qty_col + 1, new_val)
-                return True
+            row = all_values[row_idx]
+            if len(row) <= _BC_COL:
+                continue
+            row_bc = str(row[_BC_COL]).strip()
+            if row_bc != barcode:
+                continue
+            if _norm_box:
+                row_box = str(row[_BOX_COL]).strip().upper() if len(row) > _BOX_COL else ''
+                if row_box != _norm_box:
+                    continue
+            # G열 수량 (원본)
+            qty_raw = row[_QTY_COL] if len(row) > _QTY_COL else ''
+            try:
+                qty_orig = int(float(str(qty_raw).strip() or '0'))
+            except (ValueError, TypeError):
+                qty_orig = 0
+            # U열 기존 스캔 수량
+            prev_raw = row[_SCAN_COL] if len(row) > _SCAN_COL else ''
+            try:
+                prev_scan = int(float(str(prev_raw).strip() or '0'))
+            except (ValueError, TypeError):
+                prev_scan = 0
+            new_scan = max(0, prev_scan + int(decrement))
+            remaining = qty_orig - new_scan  # 안 온 상품 = 음수 가능(초과스캔 표식)
+            ws.update_cell(row_idx + 1, _SCAN_COL + 1, new_scan)
+            ws.update_cell(row_idx + 1, _REM_COL + 1, remaining)
+            return True
         return False
     except Exception:
         return False
@@ -1457,6 +1478,8 @@ def pick_process_scan(barcode, qty=1):
                    item["필요수량"], item.get("회차기호",""), item.get("박스번호","")]
         log_url = st.session_state.pick_sheet_url_출고
         _dec = sheet_decrement
+        # 배대지 시트 매칭용 박스번호 (배대지박스 식별자: M1/W3 등)
+        _bg_box = str(item.get("박스넘버") or '').strip().upper()
         # 백그라운드 스레드로 구글 시트 업데이트 (스캔 속도 향상)
         def _bg_sheet_update():
             try:
@@ -1466,7 +1489,7 @@ def pick_process_scan(barcode, qty=1):
                         st.session_state.pick_gsheet_client,
                         st.session_state.pick_sheet_url_배대지,
                         st.session_state.pick_sheet_tab_배대지,
-                        barcode, decrement=_dec
+                        barcode, decrement=_dec, box_number=_bg_box
                     )
             except Exception:
                 pass
@@ -3360,18 +3383,19 @@ with tab8:
     )
 
     if pick_mode == "📊 구글 시트 (실시간)":
-        # 기본 출고확인 고정 시트 (운영용)
+        # 기본 고정 시트 (운영용)
         _DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=224790693#gid=224790693"
+        _DEFAULT_DAPAE_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=980080486#gid=980080486"
         # 페이지 새로고침 시에도 유지되도록 query_params에서 복원
         _qp = st.query_params
         if 'pick_url_출고' not in st.session_state:
             st.session_state['pick_url_출고'] = _qp.get('pu') or _DEFAULT_SHEET_URL
         if 'pick_tab_출고' not in st.session_state:
             st.session_state['pick_tab_출고'] = _qp.get('pt') or '출고확인'
-        if 'pick_url_배대지' not in st.session_state and _qp.get('bu'):
-            st.session_state['pick_url_배대지'] = _qp.get('bu', '')
-        if 'pick_tab_배대지' not in st.session_state and _qp.get('bt'):
-            st.session_state['pick_tab_배대지'] = _qp.get('bt', '배대지입고리스트')
+        if 'pick_url_배대지' not in st.session_state:
+            st.session_state['pick_url_배대지'] = _qp.get('bu') or _DEFAULT_DAPAE_URL
+        if 'pick_tab_배대지' not in st.session_state:
+            st.session_state['pick_tab_배대지'] = _qp.get('bt') or '배대지입고리스트'
 
         st.markdown("##### 쉽먼트 시트 (출고지시서)")
         gs_col1, gs_col2 = st.columns([3, 1])
@@ -4661,7 +4685,7 @@ with tab8:
                 st.rerun()
 
         if active_boxes:
-            # 활성 박스별로 필요한 출고박스 번호 상세 표시
+            # 활성 박스별로 필요한 출고박스 번호 상세 표시 (출고박스 크기별 그룹핑)
             active_info_lines = []
             all_needed_out_boxes = set()
             for b in sorted(active_boxes, key=_box_sort_key):
@@ -4669,9 +4693,26 @@ with tab8:
                 size_lbl, size_emo = _box_size(info['total_qty'])
                 out_boxes = sorted(info['out_boxes'], key=_box_sort_key)
                 all_needed_out_boxes.update(info['out_boxes'])
-                ob_str = ', '.join(f'{o}번' for o in out_boxes)
+                # 출고박스를 크기별로 그룹화 (box_size_lookup 사용)
+                _out_L, _out_M, _out_S = [], [], []
+                for _o in out_boxes:
+                    _osl, _ = box_size_lookup.get(_o, ('소', '🔵'))
+                    if _osl == '대':
+                        _out_L.append(_o)
+                    elif _osl == '중':
+                        _out_M.append(_o)
+                    else:
+                        _out_S.append(_o)
+                parts = []
+                if _out_L:
+                    parts.append(f"🟢대형 {len(_out_L)}개: " + ', '.join(f'{o}번' for o in _out_L))
+                if _out_M:
+                    parts.append(f"🟡중형 {len(_out_M)}개: " + ', '.join(f'{o}번' for o in _out_M))
+                if _out_S:
+                    parts.append(f"🔵소형 {len(_out_S)}개: " + ', '.join(f'{o}번' for o in _out_S))
                 active_info_lines.append(
-                    f"**{b} 박스** ({size_emo}{size_lbl}, {info['total_qty']}개) → **출고박스**: {ob_str}"
+                    f"**{b} 박스** ({size_emo}{size_lbl}, {info['total_qty']}개)\n"
+                    + '\n'.join(f'　→ {p}' for p in parts)
                 )
             total_out_count = len(all_needed_out_boxes)
             header = f'📦 **활성 배대지 박스 {len(active_boxes)}개 — 준비할 출고박스 총 {total_out_count}개**'
