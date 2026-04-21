@@ -1907,19 +1907,91 @@ with tab_stock:
         (function(){{
             const doc = window.parent.document;
             {_tts_js}
-            function focusScan(){{
+
+            function findScan(){{
                 const inputs = doc.querySelectorAll('input[type="text"]');
                 for (const inp of inputs){{
-                    if (inp.placeholder && inp.placeholder.includes('#MULTI')) {{
-                        inp.focus(); inp.select(); return;
-                    }}
+                    if (inp.placeholder && inp.placeholder.includes('#MULTI')) return inp;
                 }}
+                return null;
             }}
+            function focusScan(){{
+                const inp = findScan();
+                if (inp && doc.activeElement !== inp) {{ inp.focus(); inp.select(); }}
+                return inp;
+            }}
+
+            // 1) 즉시 + 여러 타이밍에서 포커스 시도
             focusScan();
-            [50,150,300,600].forEach(d => setTimeout(focusScan, d));
-            const obs = new MutationObserver(focusScan);
-            obs.observe(doc.body, {{childList: true, subtree: true}});
-            setTimeout(function(){{ obs.disconnect(); }}, 3000);
+            [30,80,150,300,500,800,1200,1800].forEach(d => setTimeout(focusScan, d));
+
+            // 2) DOM 변화 감지 (rerun으로 새 input 생성 시 즉시 포커스)
+            if (!window.__stockScanObsAttached) {{
+                const obs = new MutationObserver(focusScan);
+                obs.observe(doc.body, {{childList: true, subtree: true}});
+                window.__stockScanObsAttached = true;
+            }}
+
+            // 3) 입력이 blur되면 즉시 다시 포커스 (실수로 다른 곳 클릭해도 복귀)
+            if (!window.__stockScanBlurAttached) {{
+                doc.addEventListener('focusout', function(ev){{
+                    const inp = findScan();
+                    if (!inp) return;
+                    if (ev.target === inp) {{
+                        setTimeout(function(){{
+                            if (doc.activeElement !== inp) focusScan();
+                        }}, 50);
+                    }}
+                }}, true);
+                window.__stockScanBlurAttached = true;
+            }}
+
+            // 4) 문자 주입 — 스캔 input 밖에서 입력된 글자를 캡처해 input에 append
+            //    "R"이 포커스 잡히기 전에 날아가는 문제 해결
+            if (!window.__stockScanKeyAttached) {{
+                const win = window.parent;
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    win.HTMLInputElement.prototype, 'value'
+                ).set;
+                doc.addEventListener('keydown', function(ev){{
+                    const inp = findScan();
+                    if (!inp) return;
+                    if (doc.activeElement === inp) return;  // 이미 포커스면 자연 입력
+                    const ae = doc.activeElement;
+                    const tag = (ae && ae.tagName || '').toLowerCase();
+                    if (tag === 'input' || tag === 'textarea' || (ae && ae.isContentEditable)) return;
+                    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+                    if (ev.key && ev.key.length === 1) {{
+                        // 프린터블 문자: input에 직접 주입 + React 감지 이벤트 발송
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        nativeSetter.call(inp, (inp.value || '') + ev.key);
+                        inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        inp.focus();
+                    }} else if (ev.key === 'Enter') {{
+                        // Enter: 포커스 이동 후 keydown 재발송
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        inp.focus();
+                        setTimeout(function(){{
+                            inp.dispatchEvent(new KeyboardEvent('keydown', {{
+                                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                            }}));
+                        }}, 5);
+                    }}
+                }}, true);
+                window.__stockScanKeyAttached = true;
+            }}
+
+            // 5) 탭 다시 활성화 시 포커스
+            if (!window.__stockScanVisAttached) {{
+                doc.addEventListener('visibilitychange', function(){{
+                    if (doc.visibilityState === 'visible') {{
+                        [50,200,500].forEach(d => setTimeout(focusScan, d));
+                    }}
+                }}, true);
+                window.__stockScanVisAttached = true;
+            }}
         }})();
         </script>
         """, height=0)
