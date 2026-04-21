@@ -1611,20 +1611,17 @@ def pick_get_progress():
     return {"total":total,"scanned":scanned,"skus":skus,"done_skus":done_skus,
             "pct":pct,"is_complete":scanned>=total,"over":over,"shortage":shortage}
 
-tab1, tab2, tab_shipment, tab8, tab_stock, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab6, tab7, tab8, tab_stock, tab3, tab4, tab5 = st.tabs([
     '📦 소형 라벨',
     '📋 대형 라벨 (90도 회전)',
-    '🚛 쉽먼트 관리',
+    '🚛 쉽먼트 통합',
+    '🔄 쉽먼트 재출력',
     '📦 피킹 & 분류',
     '📥 재고 확인',
     '📄 출고 작업 지시서 PDF',
     '📎 PDF 병합',
     '📝 발주중단 공문',
 ])
-
-# 쉽먼트 관리 탭 안에 "통합 관리"와 "재출력"을 서브탭으로 구성
-with tab_shipment:
-    tab6, tab7 = st.tabs(['🚛 쉽먼트 통합 관리', '🔄 쉽먼트 재출력'])
 
 # ── 소형 탭 ────────────────────────────────────────────
 with tab1:
