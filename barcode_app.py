@@ -1946,20 +1946,38 @@ with tab_stock:
                 window.__stockScanBlurAttached = true;
             }}
 
-            // 4) 문서 어디에서든 키 입력 시작되면 스캔 input으로 포워딩
+            // 4) 문자 주입 — 스캔 input 밖에서 입력된 글자를 캡처해 input에 append
+            //    "R"이 포커스 잡히기 전에 날아가는 문제 해결
             if (!window.__stockScanKeyAttached) {{
+                const win = window.parent;
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                    win.HTMLInputElement.prototype, 'value'
+                ).set;
                 doc.addEventListener('keydown', function(ev){{
                     const inp = findScan();
                     if (!inp) return;
-                    if (doc.activeElement === inp) return;
-                    // 편집 중인 다른 input/textarea면 스킵
-                    const tag = (doc.activeElement && doc.activeElement.tagName || '').toLowerCase();
-                    if (tag === 'input' || tag === 'textarea') return;
-                    // 알파/숫자/샵(#)/하이픈 등 프린터블 문자만 대상
+                    if (doc.activeElement === inp) return;  // 이미 포커스면 자연 입력
+                    const ae = doc.activeElement;
+                    const tag = (ae && ae.tagName || '').toLowerCase();
+                    if (tag === 'input' || tag === 'textarea' || (ae && ae.isContentEditable)) return;
+                    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
                     if (ev.key && ev.key.length === 1) {{
-                        focusScan();
+                        // 프린터블 문자: input에 직접 주입 + React 감지 이벤트 발송
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        nativeSetter.call(inp, (inp.value || '') + ev.key);
+                        inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        inp.focus();
                     }} else if (ev.key === 'Enter') {{
-                        focusScan();
+                        // Enter: 포커스 이동 후 keydown 재발송
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        inp.focus();
+                        setTimeout(function(){{
+                            inp.dispatchEvent(new KeyboardEvent('keydown', {{
+                                key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                            }}));
+                        }}, 5);
                     }}
                 }}, true);
                 window.__stockScanKeyAttached = true;
