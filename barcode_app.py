@@ -1777,85 +1777,126 @@ with tab_stock:
 
     st.success(f'📍 현재 위치: **{st.session_state.stock_location}**')
 
-    # ── 2단계: 바코드 스캔 ──
+    # ── 2단계: 바코드 스캔 (fragment로 감싸서 전체 rerun 없이 스캔 부분만 리렌더) ──
     st.divider()
-    st.markdown('### 🔍 2단계: 바코드 스캔')
-    if st.session_state.stock_qty_input_mode:
-        st.warning(f'🔢 다량 입력 모드 — 다음 스캔은 **{st.session_state.stock_next_qty}개**로 처리됩니다. `#MULTI` 다시 찍으면 해제.')
-    st.caption('💡 일반 스캔 = +1 / `#MULTI` 찍고 숫자 입력 후 바코드 = 그 수량만큼 +누적')
+    _stock_use_fragment = getattr(st, 'fragment', lambda f: f)
 
-    def _stock_process_scan(raw):
-        _now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        barcode = str(raw or '').strip()
-        if not barcode:
-            return None
-        # #MULTI 토글
-        if barcode.upper() == '#MULTI':
-            st.session_state.stock_qty_input_mode = not st.session_state.stock_qty_input_mode
-            if not st.session_state.stock_qty_input_mode:
-                st.session_state.stock_next_qty = 1
-            return {
-                'status': 'multi_trigger',
-                'message': '🔢 다량 입력 모드 ON' if st.session_state.stock_qty_input_mode else '1개 모드 복귀',
-                'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
-            }
-        # 숫자만 입력 + 다량 모드면 → next_qty 설정
-        if st.session_state.stock_qty_input_mode and barcode.isdigit():
-            n = int(barcode)
-            if n > 0:
-                st.session_state.stock_next_qty = n
-                return {
-                    'status': 'qty_set',
-                    'message': f'🔢 다음 스캔 수량 = {n}개',
-                    'barcode': barcode, 'name': '', 'qty': n, 'stock': 0, 'time': _now,
-                }
-        _qty = st.session_state.stock_next_qty if st.session_state.stock_qty_input_mode else 1
-        _res = stock_update_barcode(
-            _sclient, _STOCK_SHEET_URL, _STOCK_SHEET_TAB,
-            barcode, _qty, st.session_state.stock_location,
-        )
-        # 1회성 다량 모드 해제
+    @_stock_use_fragment
+    def _stock_scan_fragment():
         if st.session_state.stock_qty_input_mode:
-            st.session_state.stock_next_qty = 1
-            st.session_state.stock_qty_input_mode = False
-        if _res['ok']:
-            return {
-                'status': 'ok',
-                'message': f"✅ [{_res['name'][:30]}] +{_qty} → 재고 {_res['new_stock']}",
-                'barcode': barcode, 'name': _res['name'], 'qty': _qty,
-                'stock': _res['new_stock'], 'time': _now,
-            }
-        else:
-            return {
-                'status': 'error',
-                'message': f"❌ {_res['error']}",
-                'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
-            }
+            st.warning(f'🔢 다량 입력 모드 — 다음 스캔은 **{st.session_state.stock_next_qty}개**로 처리됩니다. `#MULTI` 다시 찍으면 해제.')
 
-    # 바코드 input
-    _scan_key = f"stock_scan_{st.session_state.stock_scan_counter}"
-    _scan_val = st.text_input(
-        '바코드 입력',
-        key=_scan_key,
-        placeholder='바코드를 스캔하거나 #MULTI 입력...',
-    )
-    if _scan_val:
-        _result = _stock_process_scan(_scan_val)
-        if _result:
-            st.session_state.stock_last_result = _result
-            st.session_state.stock_scan_log.append(_result)
-        st.session_state.stock_scan_counter += 1
-        st.rerun()
+        # 수량 표시
+        if st.session_state.stock_next_qty > 1:
+            st.markdown(
+                f'<div style="background:#f59e0b;color:white;padding:0.4rem;border-radius:6px;text-align:center;font-weight:bold">'
+                f'📦 다음 스캔: {st.session_state.stock_next_qty}개</div>',
+                unsafe_allow_html=True)
 
-    # 최근 결과 크게 표시
-    _last = st.session_state.stock_last_result
-    if _last:
-        if _last['status'] == 'ok':
-            st.success(_last['message'])
-        elif _last['status'] == 'error':
-            st.error(_last['message'])
-        else:
-            st.info(_last['message'])
+        def _stock_process_scan(raw):
+            _now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            barcode = str(raw or '').strip()
+            if not barcode:
+                return None
+            if barcode.upper() == '#MULTI':
+                st.session_state.stock_qty_input_mode = not st.session_state.stock_qty_input_mode
+                if not st.session_state.stock_qty_input_mode:
+                    st.session_state.stock_next_qty = 1
+                return {
+                    'status': 'multi_trigger',
+                    'message': '🔢 다량 입력 모드 ON' if st.session_state.stock_qty_input_mode else '1개 모드 복귀',
+                    'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
+                }
+            if st.session_state.stock_qty_input_mode and barcode.isdigit():
+                n = int(barcode)
+                if n > 0:
+                    st.session_state.stock_next_qty = n
+                    return {
+                        'status': 'qty_set',
+                        'message': f'🔢 다음 스캔 수량 = {n}개',
+                        'barcode': barcode, 'name': '', 'qty': n, 'stock': 0, 'time': _now,
+                    }
+            _qty = st.session_state.stock_next_qty if st.session_state.stock_qty_input_mode else 1
+            _sclient = st.session_state.get('pick_gsheet_client')
+            _res = stock_update_barcode(
+                _sclient, _STOCK_SHEET_URL, _STOCK_SHEET_TAB,
+                barcode, _qty, st.session_state.stock_location,
+            )
+            if st.session_state.stock_qty_input_mode:
+                st.session_state.stock_next_qty = 1
+                st.session_state.stock_qty_input_mode = False
+            if _res['ok']:
+                return {
+                    'status': 'ok',
+                    'message': f"✅ [{_res['name'][:30]}] +{_qty} → 재고 {_res['new_stock']}",
+                    'barcode': barcode, 'name': _res['name'], 'qty': _qty,
+                    'stock': _res['new_stock'], 'time': _now,
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'message': f"❌ {_res['error']}",
+                    'barcode': barcode, 'name': '', 'qty': 0, 'stock': 0, 'time': _now,
+                }
+
+        _scan_key = f"stock_scan_{st.session_state.stock_scan_counter}"
+        _scan_val = st.text_input(
+            '바코드 입력',
+            key=_scan_key,
+            placeholder='바코드를 스캔하거나 #MULTI 입력...',
+            label_visibility='collapsed',
+        )
+        if _scan_val:
+            _result = _stock_process_scan(_scan_val)
+            if _result:
+                st.session_state.stock_last_result = _result
+                st.session_state.stock_scan_log.append(_result)
+            st.session_state.stock_scan_counter += 1
+            st.rerun()
+
+        # 최근 결과 크게 표시
+        _last = st.session_state.stock_last_result
+        if _last:
+            if _last['status'] == 'ok':
+                st.success(_last['message'])
+            elif _last['status'] == 'error':
+                st.error(_last['message'])
+            else:
+                st.info(_last['message'])
+
+        # 최근 로그 간략 (fragment 안에서 빠르게 보기)
+        _recent = st.session_state.stock_scan_log[-5:]
+        if _recent:
+            for _e in reversed(_recent):
+                _icon = {'ok': '✅', 'error': '❌', 'multi_trigger': '🔢', 'qty_set': '🔢'}.get(_e['status'], '?')
+                st.caption(f"{_icon} {_e['time'][-8:]} | {_e['barcode']} | {_e['message']}")
+
+        # 자동 포커스 (fragment 내에서 매 rerun마다 실행)
+        from streamlit.components.v1 import html as _stock_html
+        _stock_html("""
+        <script>
+        (function(){
+            const doc = window.parent.document;
+            function focusScan(){
+                const inputs = doc.querySelectorAll('input[type="text"]');
+                for (const inp of inputs){
+                    if (inp.placeholder && inp.placeholder.includes('#MULTI')) {
+                        inp.focus(); inp.select(); return;
+                    }
+                }
+            }
+            focusScan();
+            [50,150,300,600].forEach(d => setTimeout(focusScan, d));
+            const obs = new MutationObserver(focusScan);
+            obs.observe(doc.body, {childList: true, subtree: true});
+            setTimeout(function(){ obs.disconnect(); }, 3000);
+        })();
+        </script>
+        """, height=0)
+
+    st.markdown('### 🔍 바코드 스캔')
+    st.caption('💡 일반 스캔 = +1 / `#MULTI` → 숫자 → 바코드 = 그 수량만큼 +누적')
+    _stock_scan_fragment()
 
     # ── 스캔 로그 ──
     if st.session_state.stock_scan_log:
