@@ -1880,6 +1880,7 @@ with tab_stock:
                 st.caption(f"{_icon} {_e['time'][-8:]} | {_e['barcode']} | {_e['message']}")
 
         # 음성 안내(TTS) + 자동 포커스 (fragment rerun마다 실행)
+        # scan_counter를 JS에 삽입해서 매번 고유 HTML 생성 → 캐시 방지
         from streamlit.components.v1 import html as _stock_html
         _tts_js = ''
         if _tts_msg:
@@ -1899,8 +1900,10 @@ with tab_stock:
             """
             st.session_state.stock_last_result = None
 
+        _uid = st.session_state.stock_scan_counter
         _stock_html(f"""
         <script>
+        /* scan_{_uid} */
         (function(){{
             const doc = window.parent.document;
             {_tts_js}
