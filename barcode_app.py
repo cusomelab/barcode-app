@@ -1726,57 +1726,59 @@ with tab_stock:
 
     # ── 시트 연결 ──
     _sclient = st.session_state.get('pick_gsheet_client') or get_gsheet_client()
-    if _sclient is None:
+    _stock_ready = _sclient is not None
+    if not _stock_ready:
         st.error('❌ Google Sheets 인증 실패 — 서비스 계정 키를 확인하세요')
-        st.stop()
-    st.session_state['pick_gsheet_client'] = _sclient
+    else:
+        st.session_state['pick_gsheet_client'] = _sclient
 
-    _sinfo_c1, _sinfo_c2, _sinfo_c3 = st.columns([3, 1, 1])
-    with _sinfo_c1:
-        st.text_input('구글 시트', value=_STOCK_SHEET_URL, disabled=True, key='stock_url_display')
-    with _sinfo_c2:
-        st.text_input('탭 이름', value=_STOCK_SHEET_TAB, disabled=True, key='stock_tab_display')
-    with _sinfo_c3:
-        st.markdown('<br>', unsafe_allow_html=True)
-        if st.button('🔄 시트 새로고침', key='stock_reload', use_container_width=True):
-            for _sk in ['_stock_sheet_cache', '_stock_ws']:
-                st.session_state.pop(_sk, None)
-            st.rerun()
-
-    # ── 1단계: 위치 입력 ──
-    st.divider()
-    st.markdown('### 📍 1단계: 담을 위치 지정')
-    _loc_c1, _loc_c2, _loc_c3 = st.columns([3, 1, 1])
-    with _loc_c1:
-        _loc_input = st.text_input(
-            '위치/박스 (예: G박스, A-1구역)',
-            value=st.session_state.stock_location,
-            key='stock_location_input',
-            placeholder='예: G박스, A-1구역',
-        )
-    with _loc_c2:
-        if st.button('✅ 위치 설정', use_container_width=True, key='stock_set_loc'):
-            _cleaned = _loc_input.strip()
-            if _cleaned:
-                st.session_state.stock_location = _cleaned
-                st.success(f'위치: {_cleaned}')
+        _sinfo_c1, _sinfo_c2, _sinfo_c3 = st.columns([3, 1, 1])
+        with _sinfo_c1:
+            st.text_input('구글 시트', value=_STOCK_SHEET_URL, disabled=True, key='stock_url_display')
+        with _sinfo_c2:
+            st.text_input('탭 이름', value=_STOCK_SHEET_TAB, disabled=True, key='stock_tab_display')
+        with _sinfo_c3:
+            st.markdown('<br>', unsafe_allow_html=True)
+            if st.button('🔄 시트 새로고침', key='stock_reload', use_container_width=True):
+                for _sk in ['_stock_sheet_cache', '_stock_ws']:
+                    st.session_state.pop(_sk, None)
                 st.rerun()
-            else:
-                st.error('위치를 입력하세요')
-    with _loc_c3:
-        if st.button('🔄 위치 변경', use_container_width=True, key='stock_reset_loc'):
-            st.session_state.stock_location = ''
-            st.rerun()
 
-    if not st.session_state.stock_location:
-        st.info('👆 먼저 위치를 입력하고 "✅ 위치 설정"을 눌러주세요')
-        st.stop()
+        # ── 1단계: 위치 입력 ──
+        st.divider()
+        st.markdown('### 📍 1단계: 담을 위치 지정')
+        _loc_c1, _loc_c2, _loc_c3 = st.columns([3, 1, 1])
+        with _loc_c1:
+            _loc_input = st.text_input(
+                '위치/박스 (예: G박스, A-1구역)',
+                value=st.session_state.stock_location,
+                key='stock_location_input',
+                placeholder='예: G박스, A-1구역',
+            )
+        with _loc_c2:
+            if st.button('✅ 위치 설정', use_container_width=True, key='stock_set_loc'):
+                _cleaned = _loc_input.strip()
+                if _cleaned:
+                    st.session_state.stock_location = _cleaned
+                    st.success(f'위치: {_cleaned}')
+                    st.rerun()
+                else:
+                    st.error('위치를 입력하세요')
+        with _loc_c3:
+            if st.button('🔄 위치 변경', use_container_width=True, key='stock_reset_loc'):
+                st.session_state.stock_location = ''
+                st.rerun()
 
-    st.success(f'📍 현재 위치: **{st.session_state.stock_location}**')
+        if not st.session_state.stock_location:
+            st.info('👆 먼저 위치를 입력하고 "✅ 위치 설정"을 눌러주세요')
+            _stock_ready = False
+        else:
+            st.success(f'📍 현재 위치: **{st.session_state.stock_location}**')
 
-    # ── 2단계: 바코드 스캔 (fragment로 감싸서 전체 rerun 없이 스캔 부분만 리렌더) ──
-    st.divider()
+    # ── 2단계 이하는 _stock_ready일 때만 실행 ──
     _stock_use_fragment = getattr(st, 'fragment', lambda f: f)
+    if _stock_ready:
+        st.divider()
 
     @_stock_use_fragment
     def _stock_scan_fragment():
@@ -1993,62 +1995,33 @@ with tab_stock:
         </script>
         """, height=0)
 
-    st.markdown('### 🔍 바코드 스캔')
-    st.caption('💡 일반 스캔 = +1 / `#MULTI` → 숫자 → 바코드 = 그 수량만큼 +누적')
-    _stock_scan_fragment()
+    if _stock_ready:
+        st.markdown('### 🔍 바코드 스캔')
+        st.caption('💡 일반 스캔 = +1 / `#MULTI` → 숫자 → 바코드 = 그 수량만큼 +누적')
+        _stock_scan_fragment()
 
-    # ── 스캔 로그 ──
-    if st.session_state.stock_scan_log:
-        st.divider()
-        with st.expander(f"📜 스캔 로그 ({len(st.session_state.stock_scan_log)}건)", expanded=True):
-            import pandas as _pds
-            _log_rows = []
-            for e in reversed(st.session_state.stock_scan_log[-100:]):
-                _icon = {'ok': '✅', 'error': '❌', 'multi_trigger': '🔢', 'qty_set': '🔢'}.get(e['status'], '?')
-                _log_rows.append({
-                    '시간': e['time'][-8:],
-                    '결과': _icon,
-                    '바코드': e['barcode'],
-                    '수량': e['qty'] if e['qty'] else '',
-                    '누적재고': e['stock'] if e['stock'] else '',
-                    '상품명': e['name'][:40],
-                })
-            st.dataframe(_pds.DataFrame(_log_rows), use_container_width=True, hide_index=True)
+        # ── 스캔 로그 ──
+        if st.session_state.stock_scan_log:
+            st.divider()
+            with st.expander(f"📜 스캔 로그 ({len(st.session_state.stock_scan_log)}건)", expanded=True):
+                import pandas as _pds
+                _log_rows = []
+                for e in reversed(st.session_state.stock_scan_log[-100:]):
+                    _icon = {'ok': '✅', 'error': '❌', 'multi_trigger': '🔢', 'qty_set': '🔢'}.get(e['status'], '?')
+                    _log_rows.append({
+                        '시간': e['time'][-8:],
+                        '결과': _icon,
+                        '바코드': e['barcode'],
+                        '수량': e['qty'] if e['qty'] else '',
+                        '누적재고': e['stock'] if e['stock'] else '',
+                        '상품명': e['name'][:40],
+                    })
+                st.dataframe(_pds.DataFrame(_log_rows), use_container_width=True, hide_index=True)
 
-            if st.button('🗑️ 로그 초기화', key='stock_clear_log'):
-                st.session_state.stock_scan_log = []
-                st.session_state.stock_last_result = None
-                st.rerun()
-
-    # 자동 포커스 (스캐너 연사 대응 — MutationObserver로 input 생성 즉시 포커스)
-    from streamlit.components.v1 import html as _stock_html
-    _stock_html("""
-    <script>
-    (function(){
-        const doc = window.parent.document;
-        function findScan(){
-            const inputs = doc.querySelectorAll('input[type="text"]');
-            for (const inp of inputs){
-                if (inp.placeholder && inp.placeholder.includes('#MULTI')) return inp;
-            }
-            return null;
-        }
-        function focusScan(){
-            const inp = findScan();
-            if (inp && doc.activeElement !== inp) { inp.focus(); inp.select(); }
-        }
-        focusScan();
-        [100,200,400,800,1200].forEach(d => setTimeout(focusScan, d));
-        // DOM 변경 감지하여 새 input 생성 시 즉시 포커스
-        const obs = new MutationObserver(function(){
-            focusScan();
-        });
-        obs.observe(doc.body, {childList: true, subtree: true});
-        // 5초 후 observer 정리 (성능)
-        setTimeout(function(){ obs.disconnect(); }, 5000);
-    })();
-    </script>
-    """, height=0)
+                if st.button('🗑️ 로그 초기화', key='stock_clear_log'):
+                    st.session_state.stock_scan_log = []
+                    st.session_state.stock_last_result = None
+                    st.rerun()
 
 
 # ── 출고 작업 지시서 탭 ───────────────────────────────
