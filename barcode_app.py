@@ -1165,18 +1165,8 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
     - AB열(index 27): 기존 재고 + qty 누적
     - AC열(index 28): 위치 추가 (중복이면 스킵, 여러 위치는 ", " 구분)
     - C열(index 2): 상품명 반환용
-    반환: dict {ok: bool, name: str, new_stock: int, error: str}
+    반환: dict {ok: bool, name: str, new_stock: int, error: str, row_idx: int}
     """
-    try:
-        sheet_id = _extract_sheet_id(sheet_url)
-        spreadsheet = client.open_by_key(sheet_id)
-        ws = spreadsheet.worksheet(tab_name)
-        all_values = ws.get_all_values()
-    except Exception as e:
-        return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'시트 열기 실패: {e}'}
-    if len(all_values) < 2:
-        return {'ok': False, 'name': '', 'new_stock': 0, 'error': '시트가 비어있음'}
-
     _BC_COL = 3       # D열
     _NAME_COL = 2     # C열
     _STOCK_COL = 27   # AB열 (28번째)
@@ -1188,6 +1178,31 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
         qty_int = 1
     if qty_int <= 0:
         return {'ok': False, 'name': '', 'new_stock': 0, 'error': '수량은 1 이상이어야 함'}
+
+    # 시트 데이터 캐시 (첫 호출에서만 전체 읽기, 이후 캐시 사용)
+    _cache_key = '_stock_sheet_cache'
+    all_values = st.session_state.get(_cache_key)
+    if all_values is None:
+        try:
+            sheet_id = _extract_sheet_id(sheet_url)
+            spreadsheet = client.open_by_key(sheet_id)
+            ws = spreadsheet.worksheet(tab_name)
+            all_values = ws.get_all_values()
+            st.session_state[_cache_key] = all_values
+            st.session_state['_stock_ws'] = ws
+        except Exception as e:
+            return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'시트 열기 실패: {e}'}
+    if len(all_values) < 2:
+        return {'ok': False, 'name': '', 'new_stock': 0, 'error': '시트가 비어있음'}
+
+    ws = st.session_state.get('_stock_ws')
+    if ws is None:
+        try:
+            sheet_id = _extract_sheet_id(sheet_url)
+            ws = client.open_by_key(sheet_id).worksheet(tab_name)
+            st.session_state['_stock_ws'] = ws
+        except Exception as e:
+            return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'워크시트 열기 실패: {e}'}
 
     for row_idx in range(1, len(all_values)):
         row = all_values[row_idx]
@@ -1207,6 +1222,7 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
         # AC열 위치 (중복 방지)
         existing_loc = str(row[_LOC_COL]).strip() if len(row) > _LOC_COL else ''
         loc_new = str(location or '').strip()
+        updated_loc = existing_loc
         if loc_new:
             if not existing_loc:
                 updated_loc = loc_new
@@ -1214,16 +1230,30 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
                 parts = [s.strip() for s in existing_loc.split(',') if s.strip()]
                 if loc_new not in parts:
                     parts.append(loc_new)
-                updated_loc = ', '.join(parts)
-        else:
-            updated_loc = existing_loc
+                    updated_loc = ', '.join(parts)
 
-        try:
-            ws.update_cell(row_idx + 1, _STOCK_COL + 1, new_stock)
-            if loc_new and updated_loc != existing_loc:
-                ws.update_cell(row_idx + 1, _LOC_COL + 1, updated_loc)
-        except Exception as e:
-            return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'쓰기 실패: {e}'}
+        # 캐시 즉시 반영 (다음 스캔에서 누적 정확하게)
+        while len(all_values[row_idx]) <= max(_STOCK_COL, _LOC_COL):
+            all_values[row_idx].append('')
+        all_values[row_idx][_STOCK_COL] = str(new_stock)
+        if updated_loc != existing_loc:
+            all_values[row_idx][_LOC_COL] = updated_loc
+
+        # 백그라운드 시트 쓰기 (UI 블로킹 없음)
+        import threading
+        _ws = ws
+        _r = row_idx + 1
+        _ns = new_stock
+        _ul = updated_loc
+        _loc_changed = (updated_loc != existing_loc)
+        def _bg():
+            try:
+                _ws.update_cell(_r, _STOCK_COL + 1, _ns)
+                if _loc_changed:
+                    _ws.update_cell(_r, _LOC_COL + 1, _ul)
+            except Exception:
+                pass
+        threading.Thread(target=_bg, daemon=True).start()
 
         name = str(row[_NAME_COL]).strip() if len(row) > _NAME_COL else ''
         return {'ok': True, 'name': name, 'new_stock': new_stock, 'error': ''}
@@ -1704,11 +1734,17 @@ with tab_stock:
         st.stop()
     st.session_state['pick_gsheet_client'] = _sclient
 
-    _sinfo_c1, _sinfo_c2 = st.columns([3, 1])
+    _sinfo_c1, _sinfo_c2, _sinfo_c3 = st.columns([3, 1, 1])
     with _sinfo_c1:
         st.text_input('구글 시트', value=_STOCK_SHEET_URL, disabled=True, key='stock_url_display')
     with _sinfo_c2:
         st.text_input('탭 이름', value=_STOCK_SHEET_TAB, disabled=True, key='stock_tab_display')
+    with _sinfo_c3:
+        st.markdown('<br>', unsafe_allow_html=True)
+        if st.button('🔄 시트 새로고침', key='stock_reload', use_container_width=True):
+            for _sk in ['_stock_sheet_cache', '_stock_ws']:
+                st.session_state.pop(_sk, None)
+            st.rerun()
 
     # ── 1단계: 위치 입력 ──
     st.divider()
@@ -1844,27 +1880,33 @@ with tab_stock:
                 st.session_state.stock_last_result = None
                 st.rerun()
 
-    # 자동 포커스 (스캐너 연사 대응)
+    # 자동 포커스 (스캐너 연사 대응 — MutationObserver로 input 생성 즉시 포커스)
     from streamlit.components.v1 import html as _stock_html
-    _stock_html(f"""
+    _stock_html("""
     <script>
-    (function(){{
+    (function(){
         const doc = window.parent.document;
-        function findScan(){{
+        function findScan(){
             const inputs = doc.querySelectorAll('input[type="text"]');
-            for (const inp of inputs){{
+            for (const inp of inputs){
                 if (inp.placeholder && inp.placeholder.includes('#MULTI')) return inp;
-            }}
+            }
             return null;
-        }}
-        function focusScan(){{
+        }
+        function focusScan(){
             const inp = findScan();
-            if (inp) {{ inp.focus(); inp.select(); }}
-        }}
+            if (inp && doc.activeElement !== inp) { inp.focus(); inp.select(); }
+        }
         focusScan();
-        setTimeout(focusScan, 150);
-        setTimeout(focusScan, 400);
-    }})();
+        [100,200,400,800,1200].forEach(d => setTimeout(focusScan, d));
+        // DOM 변경 감지하여 새 input 생성 시 즉시 포커스
+        const obs = new MutationObserver(function(){
+            focusScan();
+        });
+        obs.observe(doc.body, {childList: true, subtree: true});
+        // 5초 후 observer 정리 (성능)
+        setTimeout(function(){ obs.disconnect(); }, 5000);
+    })();
     </script>
     """, height=0)
 
