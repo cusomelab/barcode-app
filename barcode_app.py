@@ -1783,10 +1783,15 @@ with tab_stock:
 
     @_stock_use_fragment
     def _stock_scan_fragment():
+        def _stock_rerun():
+            try:
+                st.rerun(scope='fragment')
+            except TypeError:
+                st.rerun()
+
         if st.session_state.stock_qty_input_mode:
             st.warning(f'🔢 다량 입력 모드 — 다음 스캔은 **{st.session_state.stock_next_qty}개**로 처리됩니다. `#MULTI` 다시 찍으면 해제.')
 
-        # 수량 표시
         if st.session_state.stock_next_qty > 1:
             st.markdown(
                 f'<div style="background:#f59e0b;color:white;padding:0.4rem;border-radius:6px;text-align:center;font-weight:bold">'
@@ -1852,45 +1857,67 @@ with tab_stock:
                 st.session_state.stock_last_result = _result
                 st.session_state.stock_scan_log.append(_result)
             st.session_state.stock_scan_counter += 1
-            st.rerun()
+            _stock_rerun()
 
-        # 최근 결과 크게 표시
+        # 최근 결과 + 음성 안내
         _last = st.session_state.stock_last_result
+        _tts_msg = None
         if _last:
             if _last['status'] == 'ok':
                 st.success(_last['message'])
+                _tts_msg = '재고완료'
             elif _last['status'] == 'error':
                 st.error(_last['message'])
+                _tts_msg = '다시 찍어주세요'
             else:
                 st.info(_last['message'])
 
-        # 최근 로그 간략 (fragment 안에서 빠르게 보기)
+        # 최근 5건 간략 로그
         _recent = st.session_state.stock_scan_log[-5:]
         if _recent:
             for _e in reversed(_recent):
                 _icon = {'ok': '✅', 'error': '❌', 'multi_trigger': '🔢', 'qty_set': '🔢'}.get(_e['status'], '?')
                 st.caption(f"{_icon} {_e['time'][-8:]} | {_e['barcode']} | {_e['message']}")
 
-        # 자동 포커스 (fragment 내에서 매 rerun마다 실행)
+        # 음성 안내(TTS) + 자동 포커스 (fragment rerun마다 실행)
         from streamlit.components.v1 import html as _stock_html
-        _stock_html("""
+        _tts_js = ''
+        if _tts_msg:
+            from html import escape as _html_esc
+            _tts_js = f"""
+            try{{
+                window.speechSynthesis.cancel();
+                setTimeout(function(){{
+                    var u = new SpeechSynthesisUtterance('{_html_esc(_tts_msg)}');
+                    u.lang = 'ko-KR'; u.rate = 1.2; u.volume = 1.0;
+                    var voices = window.speechSynthesis.getVoices();
+                    var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
+                    if (koVoice) u.voice = koVoice;
+                    window.speechSynthesis.speak(u);
+                }}, 80);
+            }}catch(e){{}}
+            """
+            st.session_state.stock_last_result = None
+
+        _stock_html(f"""
         <script>
-        (function(){
+        (function(){{
             const doc = window.parent.document;
-            function focusScan(){
+            {_tts_js}
+            function focusScan(){{
                 const inputs = doc.querySelectorAll('input[type="text"]');
-                for (const inp of inputs){
-                    if (inp.placeholder && inp.placeholder.includes('#MULTI')) {
+                for (const inp of inputs){{
+                    if (inp.placeholder && inp.placeholder.includes('#MULTI')) {{
                         inp.focus(); inp.select(); return;
-                    }
-                }
-            }
+                    }}
+                }}
+            }}
             focusScan();
             [50,150,300,600].forEach(d => setTimeout(focusScan, d));
             const obs = new MutationObserver(focusScan);
-            obs.observe(doc.body, {childList: true, subtree: true});
-            setTimeout(function(){ obs.disconnect(); }, 3000);
-        })();
+            obs.observe(doc.body, {{childList: true, subtree: true}});
+            setTimeout(function(){{ obs.disconnect(); }}, 3000);
+        }})();
         </script>
         """, height=0)
 
