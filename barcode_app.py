@@ -1011,13 +1011,15 @@ def pick_append_log(client, sheet_url, log_entry):
 
 def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1, box_number=None):
     """배대지 시트 스캔 수량 기록.
-    매칭: A열(박스번호, 0) + E열(바코드, 4) 둘 다 같은 행.
+    매칭: E열(바코드, 4) 일치하는 행 중 A열(박스번호, 0) 일치 우선, 없으면 바코드만 매칭.
     기록:
       - U열(스캔수량, 20): 기존값에 decrement 만큼 누적
       - V열(남은수량, 21): G열 수량 - U열 스캔수량 (안 온 상품 체크용)
     G열(수량)은 건드리지 않음 — 원본 주문 수량으로 보존.
-    box_number 없으면 레거시 동작(바코드만 매칭) 유지.
+
+    박스번호 정규화: 영문숫자만 추출해서 비교 (예: "●M6(17)" → "M6").
     """
+    import re as _re_box
     try:
         sheet_id = _extract_sheet_id(sheet_url)
         spreadsheet = client.open_by_key(sheet_id)
@@ -1031,36 +1033,53 @@ def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=
         _SCAN_COL = 20 # U열 (누적 스캔)
         _REM_COL = 21  # V열 (남은 수량)
 
-        _norm_box = str(box_number or '').strip().upper()
+        def _norm(s):
+            """박스번호 정규화 — 영문+숫자만 추출 대문자화 ('●M6(17)' → 'M6')"""
+            return _re_box.sub(r'[^A-Z0-9]', '', str(s or '').upper())
+
+        target_box = _norm(box_number)
+        barcode = str(barcode or '').strip()
+        if not barcode:
+            return False
+
+        # 1차: 바코드 + 박스번호 정확 매칭
+        # 2차: 바코드만 매칭 (박스 불일치일 때 fallback)
+        primary_row = -1
+        fallback_row = -1
         for row_idx in range(1, len(all_values)):
             row = all_values[row_idx]
             if len(row) <= _BC_COL:
                 continue
-            row_bc = str(row[_BC_COL]).strip()
-            if row_bc != barcode:
+            if str(row[_BC_COL]).strip() != barcode:
                 continue
-            if _norm_box:
-                row_box = str(row[_BOX_COL]).strip().upper() if len(row) > _BOX_COL else ''
-                if row_box != _norm_box:
-                    continue
-            # G열 수량 (원본)
-            qty_raw = row[_QTY_COL] if len(row) > _QTY_COL else ''
-            try:
-                qty_orig = int(float(str(qty_raw).strip() or '0'))
-            except (ValueError, TypeError):
-                qty_orig = 0
-            # U열 기존 스캔 수량
-            prev_raw = row[_SCAN_COL] if len(row) > _SCAN_COL else ''
-            try:
-                prev_scan = int(float(str(prev_raw).strip() or '0'))
-            except (ValueError, TypeError):
-                prev_scan = 0
-            new_scan = max(0, prev_scan + int(decrement))
-            remaining = qty_orig - new_scan  # 안 온 상품 = 음수 가능(초과스캔 표식)
-            ws.update_cell(row_idx + 1, _SCAN_COL + 1, new_scan)
-            ws.update_cell(row_idx + 1, _REM_COL + 1, remaining)
-            return True
-        return False
+            row_box = _norm(row[_BOX_COL]) if len(row) > _BOX_COL else ''
+            if target_box and row_box == target_box:
+                primary_row = row_idx
+                break
+            if fallback_row < 0:
+                fallback_row = row_idx
+        hit_row = primary_row if primary_row >= 0 else fallback_row
+        if hit_row < 0:
+            return False
+
+        row = all_values[hit_row]
+        # G열 수량 (원본)
+        qty_raw = row[_QTY_COL] if len(row) > _QTY_COL else ''
+        try:
+            qty_orig = int(float(str(qty_raw).strip() or '0'))
+        except (ValueError, TypeError):
+            qty_orig = 0
+        # U열 기존 스캔 수량
+        prev_raw = row[_SCAN_COL] if len(row) > _SCAN_COL else ''
+        try:
+            prev_scan = int(float(str(prev_raw).strip() or '0'))
+        except (ValueError, TypeError):
+            prev_scan = 0
+        new_scan = max(0, prev_scan + int(decrement))
+        remaining = qty_orig - new_scan
+        ws.update_cell(hit_row + 1, _SCAN_COL + 1, new_scan)
+        ws.update_cell(hit_row + 1, _REM_COL + 1, remaining)
+        return True
     except Exception:
         return False
 
@@ -4708,11 +4727,22 @@ with tab8:
 
                 # 바코드 입력창에 자동 포커스 유지
                 from streamlit.components.v1 import html as _st_html
+                _qty_mode_flag = 'true' if st.session_state.pick_qty_input_mode else 'false'
                 _st_html("""<script>
                 (function(){
                     const doc = window.parent.document;
+                    const qtyMode = __QTY_MODE__;
                     function findScanInput() {
                         const inputs = doc.querySelectorAll('input[type="text"]');
+                        // 다량 모드면 수량 입력 창에 포커스
+                        if (qtyMode) {
+                            for (const inp of inputs) {
+                                if (inp.placeholder && inp.placeholder.includes('숫자 입력')) {
+                                    return inp;
+                                }
+                            }
+                        }
+                        // 기본: 바코드 스캐너 입력창
                         for (const inp of inputs) {
                             if (inp.placeholder && inp.placeholder.includes('스캐너')) {
                                 return inp;
@@ -4761,7 +4791,7 @@ with tab8:
                         setTimeout(function(){ focusScan(e); }, 50);
                     }, true);
                 })();
-                </script>""", height=0)
+                </script>""".replace('__QTY_MODE__', _qty_mode_flag), height=0)
 
                 r = st.session_state.pick_last_scan_result
                 if r:
