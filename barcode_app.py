@@ -1410,7 +1410,8 @@ def pick_init_inventory():
 
 def pick_init_picking(shipment_ids):
     """단일 또는 다중 쉽먼트 ID를 받아 피킹 초기화.
-    다중일 경우 각 바코드별로 어느 쉽먼트(박스)에 속하는지 추적."""
+    다중일 경우 각 바코드별로 어느 쉽먼트(박스)에 속하는지 추적.
+    박스 라벨은 시트 M열(출고박스번호) 값 우선 사용, 없으면 인덱스 기반 fallback."""
     if isinstance(shipment_ids, str):
         shipment_ids = [shipment_ids]
 
@@ -1418,12 +1419,45 @@ def pick_init_picking(shipment_ids):
     picking = {}
     shortage_items = []
 
+    # 시트 M열(출고박스번호) 매핑 조회 — 세션 → 캐시 → 시트 직접 읽기 순
+    _box_map = dict(st.session_state.get('pick_ship_to_box') or {})
+    if not _box_map:
+        _url = st.session_state.get('pick_sheet_url_출고', '')
+        _tab = st.session_state.get('pick_sheet_tab_출고', '')
+        if _url and _tab:
+            _cache_key = f"_pick_existing_box_{_url}_{_tab}"
+            _box_map = dict(st.session_state.get(_cache_key) or {})
+    if (not _box_map
+            and st.session_state.get('pick_use_gsheet')
+            and st.session_state.get('pick_gsheet_client')):
+        try:
+            _read = pick_read_box_numbers(
+                st.session_state.pick_gsheet_client,
+                st.session_state.get('pick_sheet_url_출고', ''),
+                st.session_state.get('pick_sheet_tab_출고', ''),
+            )
+            if _read:
+                _box_map = _read
+                # 세션에도 저장해서 다음부터 재사용
+                st.session_state['pick_ship_to_box'] = _box_map
+                _url = st.session_state.get('pick_sheet_url_출고', '')
+                _tab = st.session_state.get('pick_sheet_tab_출고', '')
+                if _url and _tab:
+                    st.session_state[f"_pick_existing_box_{_url}_{_tab}"] = _box_map
+        except Exception:
+            pass
+
     for ship_idx, shipment_id in enumerate(shipment_ids, start=1):
         shipment_df = df[df["쉽먼트운송장번호"] == shipment_id]
         if shipment_df.empty:
             st.error(f"쉽먼트 {shipment_id}를 찾을 수 없습니다")
             continue
-        ship_label = f"{ship_idx}번박스"
+        # M열 출고박스번호 우선, 없으면 인덱스 기반 fallback
+        _m_box = _box_map.get(str(shipment_id).strip())
+        if _m_box:
+            ship_label = f"{_m_box}번박스"
+        else:
+            ship_label = f"{ship_idx}번박스"
         for _, row in shipment_df.iterrows():
             bc = row["바코드"]
             symbol = row.get("회차기호", "")
