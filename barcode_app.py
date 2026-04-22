@@ -3491,24 +3491,102 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
     not_in_manifest = csv_invoices - all_pdf_invoices
     not_in_csv = all_pdf_invoices - csv_invoices
 
-    if not matched:
+    # ===== SKU 기반 fallback 매칭 + 매니페스트 순서 추출 =====
+    # 매니페스트 페이지 순서대로 송장번호 + 송장별 바코드 집합 수집
+    manifest_invoice_order = []
+    manifest_barcodes_by_inv = {}  # invoice → set(barcodes)
+    _seen_inv = set()
+    for m_bytes, _ in rp_manifest_data:
+        try:
+            m_products = _extract_manifest_products(m_bytes)
+        except Exception:
+            m_products = []
+        for box in m_products:
+            inv = box.get('invoice_number')
+            if not inv:
+                continue
+            if inv not in _seen_inv:
+                manifest_invoice_order.append(inv)
+                _seen_inv.add(inv)
+                manifest_barcodes_by_inv[inv] = set()
+            for p in box.get('products', []):
+                bc = (p.get('barcode') or '').strip()
+                if bc:
+                    manifest_barcodes_by_inv[inv].add(bc)
+    # 매니페스트에 송장번호가 한 번도 안 나오는 경우(레이블만 등) → label_invoices를 뒤에 추가
+    for inv in sorted(all_pdf_invoices):
+        if inv not in _seen_inv:
+            manifest_invoice_order.append(inv)
+            _seen_inv.add(inv)
+
+    # 시트 송장별 바코드 집합
+    sheet_barcodes_by_inv = {}
+    for inv, items in rp_grouped.items():
+        sheet_barcodes_by_inv[inv] = {
+            (it.get('productBarcode') or '').strip()
+            for it in items if (it.get('productBarcode') or '').strip()
+        }
+
+    # 송장번호 매칭 안 된 매니페스트 송장에 대해 SKU(바코드) 기반 fallback
+    sku_matched = {}  # manifest_invoice → sheet_invoice
+    unmatched_pdf = set(manifest_invoice_order) - matched
+    unused_sheet = set(csv_invoices) - matched
+    for m_inv in unmatched_pdf:
+        m_bcs = manifest_barcodes_by_inv.get(m_inv, set())
+        if not m_bcs:
+            continue
+        best_inv = None
+        best_score = 0.0
+        for s_inv in list(unused_sheet):
+            s_bcs = sheet_barcodes_by_inv.get(s_inv, set())
+            if not s_bcs:
+                continue
+            common = m_bcs & s_bcs
+            denom = max(len(m_bcs), len(s_bcs))
+            if denom == 0:
+                continue
+            score = len(common) / denom
+            # 80% 이상 일치하면 같은 출고로 판단
+            if score >= 0.8 and score > best_score:
+                best_score = score
+                best_inv = s_inv
+        if best_inv:
+            sku_matched[m_inv] = best_inv
+            unused_sheet.discard(best_inv)
+
+    # 출력 매핑: 매니페스트 송장번호 → 시트 송장번호
+    inv_to_sheet_inv = {inv: inv for inv in matched}
+    inv_to_sheet_inv.update(sku_matched)
+
+    if not inv_to_sheet_inv:
         # 진단: 양쪽 샘플 값 비교로 포맷 차이 확인
         _csv_sample = sorted(list(csv_invoices))[:3] if csv_invoices else []
         _pdf_sample = sorted(list(all_pdf_invoices))[:3] if all_pdf_invoices else []
         _diag = (
-            f'데이터와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.\n\n'
+            f'데이터와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다 (송장 매칭 + SKU 매칭 모두 실패).\n\n'
             f'**진단**:\n'
             f'- 시트/CSV 송장번호 ({len(csv_invoices)}건) 샘플: `{_csv_sample}`\n'
             f'- PDF 송장번호 ({len(all_pdf_invoices)}건) 샘플: `{_pdf_sample}`\n\n'
-            f'👉 두 값의 **포맷이 다르면** 매칭 실패 원인 (예: 과학표기 `4.62E+11` vs 정수 `462139010304`, '
-            f'또는 공백/소수점 혼재). 시트 셀 서식을 `일반` 또는 `텍스트`로 바꾸고 재로드하세요.'
+            f'👉 두 값의 **포맷이 다르면** 매칭 실패 원인 (예: 과학표기 `4.62E+11` vs 정수 `462139010304`).\n'
+            f'👉 SKU/바코드도 시트와 매니페스트가 서로 다르면 자동 매칭 불가.'
         )
         return {'error': _diag}
 
+    # 매니페스트 페이지 순서로 정렬된 송장 (출력 순서)
+    ordered_manifest_invs = [inv for inv in manifest_invoice_order if inv in inv_to_sheet_inv]
+    # 매니페스트에 없지만 시트+라벨 매칭된 송장(드물지만) → 뒤에 추가
+    for inv in sorted(inv_to_sheet_inv.keys()):
+        if inv not in ordered_manifest_invs:
+            ordered_manifest_invs.append(inv)
+
+    # 박스번호 부여용 매칭(시트 송장번호 기준)
+    matched_sheet_invs = set(inv_to_sheet_inv.values())
+
     _s('📄 출고지시서 생성 중...')
+    # 박스번호는 시트 송장번호 기준으로 부여 (M열 키와 일치시킴)
     rp_all_items = []
-    for inv_num in sorted(matched):
-        rp_all_items.extend(rp_grouped[inv_num])
+    for s_inv in sorted(matched_sheet_invs):
+        rp_all_items.extend(rp_grouped[s_inv])
     if existing_box_map is not None:
         rp_ship_to_box_num = assign_box_numbers_with_existing(rp_all_items, existing_box_map)
     else:
@@ -3526,15 +3604,20 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
                 new_box_only, only_empty=True,
             )
 
+    # 출고지시서 PDF: 매니페스트 송장 키로 저장 (PDF 통합 시 같은 키 사용)
     rp_so_by_invoice = {}
-    for inv_num in sorted(matched):
-        inv_items = rp_grouped[inv_num]
-        auto_box_num = rp_ship_to_box_num.get(inv_num)
+    for m_inv in ordered_manifest_invs:
+        s_inv = inv_to_sheet_inv[m_inv]
+        inv_items = rp_grouped.get(s_inv, [])
+        if not inv_items:
+            continue
+        auto_box_num = rp_ship_to_box_num.get(s_inv)
         center = inv_items[0].get('logisticsCenter', '')
-        gk = f"{center}_{inv_num}" if center else inv_num
-        real_shipment_id = invoice_to_shipment_id.get(inv_num, inv_num)
+        gk = f"{center}_{m_inv}" if center else m_inv
+        # 출고지시서 헤더에 표시되는 쉽먼트번호: 매니페스트의 shipment_id 우선
+        real_shipment_id = invoice_to_shipment_id.get(m_inv, m_inv)
         pdf_buf = create_work_order_pdf(gk, inv_items, real_shipment_id, auto_box_num)
-        rp_so_by_invoice[inv_num] = pdf_buf
+        rp_so_by_invoice[m_inv] = pdf_buf
     _p(0.6)
 
     _s('📎 통합 PDF 생성 중...')
@@ -3543,11 +3626,12 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
     rp_so_only_writer = PdfWriter()
     rp_total = rp_label_total = rp_shipment_total = rp_so_total = 0
 
+    # 매니페스트 송장 단위로 페이지 인덱스 수집 (page-order 보존)
     manifest_pages_by_inv = {}
     for m_bytes, sorted_m in rp_manifest_data:
         for g in sorted_m:
             inv = g['invoice_number']
-            if not inv or inv not in matched:
+            if not inv or inv not in inv_to_sheet_inv:
                 continue
             manifest_pages_by_inv.setdefault(inv, []).append((m_bytes, g['page_indices']))
 
@@ -3555,12 +3639,12 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
     for l_bytes, sorted_l in rp_label_data:
         for g in sorted_l:
             inv = g['invoice_number']
-            if not inv or inv not in matched:
+            if not inv or inv not in inv_to_sheet_inv:
                 continue
             label_groups_by_inv.setdefault(inv, []).append((l_bytes, g))
 
-    # Pass 1: 송장별 [출고지시서 → 매니페스트(동봉문서)] 순서로 배치
-    for inv_num in sorted(matched):
+    # Pass 1: 매니페스트 페이지 순서대로 [출고지시서 → 매니페스트(동봉문서)] 배치
+    for inv_num in ordered_manifest_invs:
         if inv_num in rp_so_by_invoice:
             so_buf = rp_so_by_invoice[inv_num]
             so_buf.seek(0)
@@ -3579,7 +3663,7 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
                 rp_shipment_total += 1
 
     # Pass 2: 라벨지(4분할)는 마지막에 모아서 배치 (이면지로 출력 가능하도록)
-    for inv_num in sorted(matched):
+    for inv_num in ordered_manifest_invs:
         inv_label_list = label_groups_by_inv.get(inv_num, [])
         if not inv_label_list:
             continue
@@ -3619,9 +3703,11 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
         'total': rp_total,
         'shipment_total': rp_shipment_total,
         'so_total': rp_so_total,
-        'matched': len(matched),
+        'matched': len(inv_to_sheet_inv),
+        'invoice_matched': len(matched),
+        'sku_matched': sku_matched,  # {매니페스트 송장: 시트 송장} (SKU로만 매칭된 것)
         'not_in_manifest': sorted(not_in_manifest),
-        'not_in_csv': sorted(not_in_csv),
+        'not_in_csv': sorted(set(not_in_csv) - set(sku_matched.keys())),
         'ship_to_box_num': rp_ship_to_box_num,
         'new_box_only': new_box_only,
         'sheet_write_result': sheet_write_result,
@@ -4036,10 +4122,23 @@ with tab8:
                             st.warning('⚠️ 시트 M열 쓰기 실패 — 박스번호가 시트에 저장되지 않았습니다.')
                         _n_new = len(_pk_result.get('new_box_only') or {})
                         _n_reuse = _pk_result['matched'] - _n_new
-                        st.success(
+                        _n_inv_match = _pk_result.get('invoice_matched', _pk_result['matched'])
+                        _sku_map = _pk_result.get('sku_matched') or {}
+                        _n_sku_match = len(_sku_map)
+                        _msg = (
                             f'✅ 재출력 완료 — 매칭 {_pk_result["matched"]}건 '
-                            f'(신규 박스번호 {_n_new}건 기록 / 기존 {_n_reuse}건 재사용)'
+                            f'(송장 {_n_inv_match}건 / SKU 매칭 {_n_sku_match}건). '
+                            f'박스번호: 신규 {_n_new}건 / 기존 {_n_reuse}건 재사용'
                         )
+                        st.success(_msg)
+
+                        if _sku_map:
+                            with st.expander(f'⚠️ SKU 기반 매칭 {_n_sku_match}건 — 송장번호 불일치 (PDF↔시트)', expanded=True):
+                                st.caption('매니페스트 송장번호와 시트 송장번호가 다르지만, SKU(바코드) 구성이 같아서 자동 매칭됨. 시트의 송장번호를 매니페스트 값으로 갱신 권장.')
+                                st.dataframe(
+                                    [{'매니페스트 송장(=실제)': k, '시트 송장(현재)': v} for k, v in _sku_map.items()],
+                                    use_container_width=True, hide_index=True,
+                                )
 
                         _c1, _c2, _c3 = st.columns(3)
                         with _c1:
