@@ -1291,7 +1291,23 @@ def pick_clean_출고(df):
         st.error(f"출고지시서 필수 컬럼 누락: {missing}")
         return None
     df["수량"] = _pd.to_numeric(df["수량"], errors="coerce").fillna(0).astype(int)
-    df["쉽먼트운송장번호"] = df["쉽먼트운송장번호"].astype(str).str.replace(r"\.0$", "", regex=True)
+
+    # 쉽먼트운송장번호 정규화:
+    # - 과학표기법(4.62E+11) → 462139010304
+    # - float 표기(462139010304.0) → 462139010304
+    # - 공백/None 제거
+    def _norm_ship(v):
+        s = str(v if v is not None else '').strip()
+        if not s or s.lower() in ('nan', 'none'):
+            return ''
+        # 과학표기법 또는 소수점 포함 → int 변환
+        if 'E' in s or 'e' in s or '.' in s:
+            try:
+                return str(int(float(s)))
+            except (ValueError, TypeError):
+                pass
+        return s
+    df["쉽먼트운송장번호"] = df["쉽먼트운송장번호"].apply(_norm_ship)
     df["바코드"] = df["바코드"].astype(str).str.strip()
     # 확인 수량(L열) 보존 - 시트 재로드 시 진행 상태 복원용
     check_col = None
@@ -3357,6 +3373,18 @@ with tab6:
 # ── 쉽먼트 재출력 탭 ──────────────────────────────────────
 def _pick_df_to_items(df):
     """피킹&분류 탭의 df_출고 → create_work_order_pdf 용 items 리스트 변환"""
+    def _norm_ship(v):
+        """운송장번호 정규화 (과학표기/float → 정수 문자열)"""
+        s = str(v if v is not None else '').strip()
+        if not s or s.lower() in ('nan', 'none'):
+            return ''
+        if 'E' in s or 'e' in s or '.' in s:
+            try:
+                return str(int(float(s)))
+            except (ValueError, TypeError):
+                pass
+        return s
+
     items = []
     for _, row in df.iterrows():
         try:
@@ -3369,7 +3397,7 @@ def _pick_df_to_items(df):
             'productBarcode': str(row.get('바코드', '') or '').strip(),
             'productName': str(row.get('상품명', '') or '').strip(),
             'quantity': qty,
-            'shipmentNumber': str(row.get('쉽먼트운송장번호', '') or '').strip(),
+            'shipmentNumber': _norm_ship(row.get('쉽먼트운송장번호', '')),
             'orderDate': str(row.get('발주일', '') or '').strip(),
             'boxNumber': str(row.get('박스번호', '') or '').strip(),
             'location': str(row.get('위치', '') or row.get('적재위치', '') or '').strip(),
@@ -3464,7 +3492,18 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
     not_in_csv = all_pdf_invoices - csv_invoices
 
     if not matched:
-        return {'error': '데이터와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.'}
+        # 진단: 양쪽 샘플 값 비교로 포맷 차이 확인
+        _csv_sample = sorted(list(csv_invoices))[:3] if csv_invoices else []
+        _pdf_sample = sorted(list(all_pdf_invoices))[:3] if all_pdf_invoices else []
+        _diag = (
+            f'데이터와 매니페스트/라벨 간 매칭되는 송장번호가 없습니다.\n\n'
+            f'**진단**:\n'
+            f'- 시트/CSV 송장번호 ({len(csv_invoices)}건) 샘플: `{_csv_sample}`\n'
+            f'- PDF 송장번호 ({len(all_pdf_invoices)}건) 샘플: `{_pdf_sample}`\n\n'
+            f'👉 두 값의 **포맷이 다르면** 매칭 실패 원인 (예: 과학표기 `4.62E+11` vs 정수 `462139010304`, '
+            f'또는 공백/소수점 혼재). 시트 셀 서식을 `일반` 또는 `텍스트`로 바꾸고 재로드하세요.'
+        )
+        return {'error': _diag}
 
     _s('📄 출고지시서 생성 중...')
     rp_all_items = []
@@ -3520,6 +3559,7 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
                 continue
             label_groups_by_inv.setdefault(inv, []).append((l_bytes, g))
 
+    # Pass 1: 송장별 [출고지시서 → 매니페스트(동봉문서)] 순서로 배치
     for inv_num in sorted(matched):
         if inv_num in rp_so_by_invoice:
             so_buf = rp_so_by_invoice[inv_num]
@@ -3537,23 +3577,27 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
                 rp_shipment_only_writer.add_page(m_reader.pages[pidx])
                 rp_total += 1
                 rp_shipment_total += 1
+
+    # Pass 2: 라벨지(4분할)는 마지막에 모아서 배치 (이면지로 출력 가능하도록)
+    for inv_num in sorted(matched):
         inv_label_list = label_groups_by_inv.get(inv_num, [])
-        if inv_label_list:
-            grouped_by_lbytes = {}
-            for l_bytes, grp in inv_label_list:
-                grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
-            for _, (l_bytes, groups) in grouped_by_lbytes.items():
-                four_up = _render_labels_4up(l_bytes, groups)
-                for img in four_up:
-                    img_buf = io.BytesIO()
-                    img.save(img_buf, format='PDF', resolution=300)
-                    img_buf.seek(0)
-                    lp = PdfReader(img_buf)
-                    rp_final_writer.add_page(lp.pages[0])
-                    rp_shipment_only_writer.add_page(lp.pages[0])
-                    rp_total += 1
-                    rp_label_total += 1
-                    rp_shipment_total += 1
+        if not inv_label_list:
+            continue
+        grouped_by_lbytes = {}
+        for l_bytes, grp in inv_label_list:
+            grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
+        for _, (l_bytes, groups) in grouped_by_lbytes.items():
+            four_up = _render_labels_4up(l_bytes, groups)
+            for img in four_up:
+                img_buf = io.BytesIO()
+                img.save(img_buf, format='PDF', resolution=300)
+                img_buf.seek(0)
+                lp = PdfReader(img_buf)
+                rp_final_writer.add_page(lp.pages[0])
+                rp_shipment_only_writer.add_page(lp.pages[0])
+                rp_total += 1
+                rp_label_total += 1
+                rp_shipment_total += 1
 
     _p(0.9)
     rp_final_buf = io.BytesIO()
