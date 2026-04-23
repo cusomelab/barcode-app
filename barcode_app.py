@@ -3008,6 +3008,51 @@ def _render_labels_4up(pdf_bytes, sorted_groups, dpi=300):
     return result
 
 
+def _render_labels_4up_combined(label_items, dpi=300):
+    """여러 PDF의 여러 페이지를 순서대로 모아 4분할 A4로 렌더.
+    송장별로 끊지 않고 전체를 연속해서 4개씩 배치 → 빈 슬롯 최소화.
+    label_items: [(pdf_bytes, page_indices), ...]
+    반환: PIL Image 리스트 (A4 페이지들)
+    """
+    images = []
+    pdf_cache = {}
+    for pdf_bytes, page_indices in label_items:
+        key = id(pdf_bytes)
+        if key not in pdf_cache:
+            pdf_cache[key] = pdfium.PdfDocument(pdf_bytes)
+        pdf_doc = pdf_cache[key]
+        for idx in page_indices:
+            page = pdf_doc[idx]
+            bitmap = page.render(scale=dpi / 72)
+            images.append(bitmap.to_pil())
+    for pdf_doc in pdf_cache.values():
+        try:
+            pdf_doc.close()
+        except Exception:
+            pass
+
+    a4_w, a4_h = int(8.27 * dpi), int(11.69 * dpi)
+    slot_w, slot_h = a4_w // 2, a4_h // 2
+    result = []
+    for start in range(0, len(images), 4):
+        chunk = images[start:start + 4]
+        canvas = Image.new('RGB', (a4_w, a4_h), 'white')
+        positions = [(0, 0), (slot_w, 0), (0, slot_h), (slot_w, slot_h)]
+        for i, img in enumerate(chunk):
+            ratio = img.width / img.height
+            s_ratio = slot_w / slot_h
+            if ratio > s_ratio:
+                nw, nh = slot_w, int(slot_w / ratio)
+            else:
+                nh, nw = slot_h, int(slot_h * ratio)
+            resized = img.resize((nw, nh), Image.LANCZOS)
+            x = positions[i][0] + (slot_w - nw) // 2
+            y = positions[i][1] + (slot_h - nh) // 2
+            canvas.paste(resized, (x, y))
+        result.append(canvas)
+    return result
+
+
 def _parse_csv_bytes(csv_bytes):
     """CSV 바이트 → 아이템 리스트"""
     text = csv_bytes.decode('utf-8-sig', errors='replace')
@@ -3755,26 +3800,25 @@ def _run_reprint_pipeline(rp_items, rp_manifest_files, rp_label_files,
                 rp_total += 1
                 rp_shipment_total += 1
 
-    # Pass 2: 라벨지(4분할)는 마지막에 모아서 배치 (이면지로 출력 가능하도록)
+    # Pass 2: 모든 송장의 라벨을 송장 순서대로 모아서 "한꺼번에" 4분할 배치
+    # → 송장별로 끊지 않아 빈 슬롯 최소화, 4장씩 빽빽하게 배치됨
+    _all_label_items = []
     for inv_num in ordered_manifest_invs:
-        inv_label_list = label_groups_by_inv.get(inv_num, [])
-        if not inv_label_list:
-            continue
-        grouped_by_lbytes = {}
-        for l_bytes, grp in inv_label_list:
-            grouped_by_lbytes.setdefault(id(l_bytes), [l_bytes, []])[1].append(grp)
-        for _, (l_bytes, groups) in grouped_by_lbytes.items():
-            four_up = _render_labels_4up(l_bytes, groups)
-            for img in four_up:
-                img_buf = io.BytesIO()
-                img.save(img_buf, format='PDF', resolution=300)
-                img_buf.seek(0)
-                lp = PdfReader(img_buf)
-                rp_final_writer.add_page(lp.pages[0])
-                rp_shipment_only_writer.add_page(lp.pages[0])
-                rp_total += 1
-                rp_label_total += 1
-                rp_shipment_total += 1
+        for l_bytes, grp in label_groups_by_inv.get(inv_num, []):
+            _all_label_items.append((l_bytes, grp['page_indices']))
+
+    if _all_label_items:
+        four_up_pages = _render_labels_4up_combined(_all_label_items)
+        for img in four_up_pages:
+            img_buf = io.BytesIO()
+            img.save(img_buf, format='PDF', resolution=300)
+            img_buf.seek(0)
+            lp = PdfReader(img_buf)
+            rp_final_writer.add_page(lp.pages[0])
+            rp_shipment_only_writer.add_page(lp.pages[0])
+            rp_total += 1
+            rp_label_total += 1
+            rp_shipment_total += 1
 
     _p(0.9)
     rp_final_buf = io.BytesIO()
