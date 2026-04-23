@@ -2038,9 +2038,17 @@ with tab_stock:
                 return inp;
             }}
 
-            // 1) 즉시 + 여러 타이밍에서 포커스 시도
+            // 1) 즉시 + 여러 타이밍 + 지속적 interval로 포커스 보장
             focusScan();
             [30,80,150,300,500,800,1200,1800].forEach(d => setTimeout(focusScan, d));
+
+            // 1-1) 0.4초마다 지속 체크 (스캔 직후 rerun으로 새 input 생성되면 즉시 포커스)
+            if (window.__stockScanInterval) clearInterval(window.__stockScanInterval);
+            window.__stockScanInterval = setInterval(function(){{
+                const sel = doc.getSelection && doc.getSelection();
+                if (sel && sel.toString().length > 0) return;
+                focusScan();
+            }}, 400);
 
             // 2) DOM 변화 감지 (rerun으로 새 input 생성 시 즉시 포커스)
             if (!window.__stockScanObsAttached) {{
