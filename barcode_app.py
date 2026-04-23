@@ -1282,9 +1282,9 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
 def _tts_ko_script(message, pitch=None, extra_rate=0.0):
     """한국어 TTS JS 코드 생성.
     - 세션의 pick_tts_gender(female/male), pick_tts_rate 사용
-    - 남자 선택: 남자 voice 우선 검색 + pitch 0.5로 톤 확실히 낮춤
-    - 여자 선택: 여자 voice 우선 검색 + pitch 1.1로 톤 약간 높임
-    → 두 노트북에서 확실히 다른 음성으로 들림
+    - 항상 한국어(ko-*) voice 사용 → 외국인 발음으로 대체되는 문제 방지
+    - 남자: 한국어 남자 voice 우선, 없으면 한국어 여자 voice + pitch 0.4 (낮게)
+    - 여자: 한국어 여자 voice 우선, 없으면 아무 한국어 voice + pitch 1.1
     반환: <script> 태그 내부에 바로 넣을 JS 코드
     """
     gender = st.session_state.get('pick_tts_gender', 'female')
@@ -1292,7 +1292,7 @@ def _tts_ko_script(message, pitch=None, extra_rate=0.0):
     final_rate = max(0.5, min(2.0, base_rate + extra_rate))
     # 성별별 기본 pitch (caller가 명시적으로 넘기면 그걸 우선)
     if pitch is None:
-        pitch = 0.5 if gender == 'male' else 1.1
+        pitch = 0.4 if gender == 'male' else 1.1  # 남자는 0.5 → 0.4로 더 낮춤
     msg_esc = str(message).replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ')
     return (
         "try{window.speechSynthesis.cancel();setTimeout(function(){"
@@ -1303,25 +1303,25 @@ def _tts_ko_script(message, pitch=None, extra_rate=0.0):
         "u.volume=1.0;"
         "var g='" + gender + "';"
         "var fH=['heami','yuna','sun-hi','sunhi','hyunjung','ji-min','jimin','seo-hyeon','seohyeon','female','woman'];"
-        "var mH=['injoon','in-joon','minsu','min-su','jungmin','jung-min','male','man','david','mark','guy'];"
+        "var mH=['injoon','in-joon','minsu','min-su','jungmin','jung-min'];"
         "var H=g==='male'?mH:fH;"
         "var V=window.speechSynthesis.getVoices();"
+        # 한국어 voice만 필터 (외국 voice는 배제 → 혀 꼬부라진 발음 방지)
+        "var Vko=V.filter(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});"
         "var k=null;"
-        # 0차(최우선): 사용자가 고급 설정에서 직접 고른 voice (localStorage에 저장됨)
+        # 0차(최우선): 사용자가 고급 설정에서 직접 고른 voice (localStorage)
         "try{var pref=window.localStorage.getItem('__preferred_voice');"
         "if(pref){k=V.find(function(v){return v.name===pref;});}}catch(e){}"
-        # 1차: 한국어 + 성별 힌트 일치 / 2차: 아무 한국어 voice (pitch로 보정)
+        # 1차: 한국어 voice 중 성별 힌트 이름 일치
         "if(!k){for(var i=0;i<H.length&&!k;i++){"
-        "for(var j=0;j<V.length;j++){"
-        "var v=V[j];"
-        "if((v.lang||'').toLowerCase().indexOf('ko')===0&&"
-        "(v.name||'').toLowerCase().indexOf(H[i])>=0){k=v;break;}"
+        "for(var j=0;j<Vko.length;j++){"
+        "var v=Vko[j];"
+        "if((v.name||'').toLowerCase().indexOf(H[i])>=0){k=v;break;}"
         "}"
         "}}"
-        # 3차: 남자 모드인데 한국어 남자 voice 없으면 아무 언어의 남자 voice라도 사용
-        "if(!k&&g==='male'){for(var j=0;j<V.length;j++){var v=V[j];"
-        "if((v.name||'').toLowerCase().search(/injoon|minsu|male|man|david|mark|guy/i)>=0){k=v;break;}}}"
-        "if(!k){k=V.find(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});}"
+        # 2차: 한국어 voice 중 아무거나 (남자 voice 없으면 pitch 0.4로 남자 톤 흉내)
+        "if(!k){k=Vko[0];}"
+        # 3차(마지막 보루): 한국어 voice 자체가 없으면 그냥 기본 사용 (브라우저가 알아서)
         "if(k)u.voice=k;"
         "window.speechSynthesis.speak(u);"
         "},120);}catch(e){}"
