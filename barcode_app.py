@@ -5687,13 +5687,10 @@ with tab8:
 
         # ── 바코드 스캔 (fragment으로 감싸서 전체 앱 리런 없이 조각만 재실행) ──
         def _scan_rerun():
-            """Fragment 내부면 조각 리런, 아니면 전체 리런 (구버전 Streamlit fallback)."""
-            try:
-                st.rerun(scope='fragment')
-            except TypeError:
-                st.rerun()
-            except Exception:
-                st.rerun()
+            """입고분류는 fragment 바깥 테이블들(박스 상품 리스트, 박스별 진행 현황 등)도
+            스캔 직후 갱신되어야 하므로 전체 rerun 사용. 포커스는 자동 포커스 JS가 잡음.
+            """
+            st.rerun()
 
         _use_fragment = getattr(st, 'fragment', lambda f: f)
 
