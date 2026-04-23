@@ -1303,18 +1303,24 @@ def _tts_ko_script(message, pitch=None, extra_rate=0.0):
         "u.volume=1.0;"
         "var g='" + gender + "';"
         "var fH=['heami','yuna','sun-hi','sunhi','hyunjung','ji-min','jimin','seo-hyeon','seohyeon','female','woman'];"
-        "var mH=['injoon','in-joon','minsu','min-su','jungmin','jung-min','male','man'];"
+        "var mH=['injoon','in-joon','minsu','min-su','jungmin','jung-min','male','man','david','mark','guy'];"
         "var H=g==='male'?mH:fH;"
         "var V=window.speechSynthesis.getVoices();"
         "var k=null;"
+        # 0차(최우선): 사용자가 고급 설정에서 직접 고른 voice (localStorage에 저장됨)
+        "try{var pref=window.localStorage.getItem('__preferred_voice');"
+        "if(pref){k=V.find(function(v){return v.name===pref;});}}catch(e){}"
         # 1차: 한국어 + 성별 힌트 일치 / 2차: 아무 한국어 voice (pitch로 보정)
-        "for(var i=0;i<H.length&&!k;i++){"
+        "if(!k){for(var i=0;i<H.length&&!k;i++){"
         "for(var j=0;j<V.length;j++){"
         "var v=V[j];"
         "if((v.lang||'').toLowerCase().indexOf('ko')===0&&"
         "(v.name||'').toLowerCase().indexOf(H[i])>=0){k=v;break;}"
         "}"
-        "}"
+        "}}"
+        # 3차: 남자 모드인데 한국어 남자 voice 없으면 아무 언어의 남자 voice라도 사용
+        "if(!k&&g==='male'){for(var j=0;j<V.length;j++){var v=V[j];"
+        "if((v.name||'').toLowerCase().search(/injoon|minsu|male|man|david|mark|guy/i)>=0){k=v;break;}}}"
         "if(!k){k=V.find(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});}"
         "if(k)u.voice=k;"
         "window.speechSynthesis.speak(u);"
@@ -4096,6 +4102,73 @@ with tab8:
         st.markdown('<br>', unsafe_allow_html=True)
         if st.button('🔊 음성 테스트', key='pick_tts_test', use_container_width=True):
             st.session_state['pick_tts_test_pending'] = True
+
+    # 음성 이름 직접 선택기 (브라우저 voice 목록 표시)
+    with st.expander('⚙️ 음성 고급 설정 — 내 브라우저에 설치된 voice 직접 선택', expanded=False):
+        st.caption('"남자 선택해도 여자 목소리"로 들린다면 이 드롭다운에서 남자 이름의 voice를 직접 고르세요. 목록은 브라우저/OS에 따라 다릅니다.')
+        from streamlit.components.v1 import html as _voice_pick_html
+        _voice_pick_html("""
+        <div style="padding:8px;background:#f3f4f6;border-radius:8px;font-family:system-ui">
+          <div style="font-size:12px;color:#555;margin-bottom:6px">내 브라우저에 설치된 음성 목록:</div>
+          <select id="__voice_select" style="width:100%;padding:6px;font-size:14px" onchange="__saveVoice()">
+            <option value="">(자동 선택 — 성별 라디오 기준)</option>
+          </select>
+          <button onclick="__testVoice()" style="margin-top:6px;padding:4px 12px">🔊 이 음성 테스트</button>
+          <span id="__voice_status" style="margin-left:10px;color:#1a56db;font-size:12px"></span>
+        </div>
+        <script>
+        (function(){
+            const win = window.parent;
+            const doc = win.document;
+            function listVoices() {
+                const sel = doc.getElementById('__voice_select');
+                if (!sel) return;
+                const voices = win.speechSynthesis.getVoices();
+                const saved = win.localStorage.getItem('__preferred_voice') || '';
+                sel.innerHTML = '<option value="">(자동 선택 — 성별 라디오 기준)</option>';
+                voices.forEach(function(v){
+                    const opt = doc.createElement('option');
+                    opt.value = v.name;
+                    const genderHint = /injoon|minsu|male|man|david|mark|guy/i.test(v.name) ? ' 👨' :
+                                       /heami|yuna|female|woman|zira|jenny/i.test(v.name) ? ' 👩' : '';
+                    opt.textContent = v.name + ' [' + v.lang + ']' + genderHint;
+                    if (v.name === saved) opt.selected = true;
+                    sel.appendChild(opt);
+                });
+            }
+            win.__saveVoice = function(){
+                const sel = doc.getElementById('__voice_select');
+                if (!sel) return;
+                win.localStorage.setItem('__preferred_voice', sel.value || '');
+                const status = doc.getElementById('__voice_status');
+                if (status) status.textContent = sel.value ? '✅ 저장됨: ' + sel.value : '자동 선택 모드';
+            };
+            win.__testVoice = function(){
+                const sel = doc.getElementById('__voice_select');
+                const name = sel ? sel.value : '';
+                const u = new SpeechSynthesisUtterance('안녕하세요. 이 음성으로 재고완료. 다시 찍어주세요.');
+                u.lang = 'ko-KR';
+                const voices = win.speechSynthesis.getVoices();
+                if (name) {
+                    const v = voices.find(function(x){ return x.name === name; });
+                    if (v) u.voice = v;
+                } else {
+                    const v = voices.find(function(x){ return (x.lang||'').indexOf('ko') === 0; });
+                    if (v) u.voice = v;
+                }
+                win.speechSynthesis.cancel();
+                win.speechSynthesis.speak(u);
+            };
+            // Voices may load asynchronously
+            if (win.speechSynthesis.getVoices().length > 0) {
+                listVoices();
+            }
+            win.speechSynthesis.onvoiceschanged = listVoices;
+            setTimeout(listVoices, 300);
+            setTimeout(listVoices, 800);
+        })();
+        </script>
+        """, height=150)
 
     # 음성 테스트 실행 (설정 바꾼 직후 들어보기 용)
     if st.session_state.get('pick_tts_test_pending'):
