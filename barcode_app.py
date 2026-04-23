@@ -1279,19 +1279,20 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
     return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'미등록 바코드: {barcode}'}
 
 
-def _tts_ko_script(message, pitch=1.0, extra_rate=0.0):
+def _tts_ko_script(message, pitch=None, extra_rate=0.0):
     """한국어 TTS JS 코드 생성.
     - 세션의 pick_tts_gender(female/male), pick_tts_rate 사용
-    - 선호 성별의 한국어 voice 우선 검색
-    - 남자 음성 없는 환경(Chrome 등): 여자 voice + 낮은 pitch(0.7) 로 남자스러운 톤 흉내
+    - 남자 선택: 남자 voice 우선 검색 + pitch 0.5로 톤 확실히 낮춤
+    - 여자 선택: 여자 voice 우선 검색 + pitch 1.1로 톤 약간 높임
+    → 두 노트북에서 확실히 다른 음성으로 들림
     반환: <script> 태그 내부에 바로 넣을 JS 코드
     """
     gender = st.session_state.get('pick_tts_gender', 'female')
     base_rate = float(st.session_state.get('pick_tts_rate', 1.0))
     final_rate = max(0.5, min(2.0, base_rate + extra_rate))
-    # 남자 모드일 때 기본 pitch를 낮춰서 남자 음성 흉내 (실제 남자 voice 못 찾을 때도 효과)
-    if gender == 'male' and pitch == 1.0:
-        pitch = 0.7
+    # 성별별 기본 pitch (caller가 명시적으로 넘기면 그걸 우선)
+    if pitch is None:
+        pitch = 0.5 if gender == 'male' else 1.1
     msg_esc = str(message).replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ')
     return (
         "try{window.speechSynthesis.cancel();setTimeout(function(){"
@@ -4075,7 +4076,7 @@ with tab8:
     st.caption('하나의 시트로 피킹검증 또는 입고분류를 모드 전환하며 사용')
 
     # ── 음성(TTS) 설정 ──
-    _tts_col1, _tts_col2 = st.columns([1, 1])
+    _tts_col1, _tts_col2, _tts_col3 = st.columns([1, 1, 1])
     with _tts_col1:
         _tts_gender = st.radio(
             "🔊 음성",
@@ -4091,6 +4092,20 @@ with tab8:
             key='pick_tts_rate',
             help="발음이 잘 안 들리면 1.0 이하로 낮추세요",
         )
+    with _tts_col3:
+        st.markdown('<br>', unsafe_allow_html=True)
+        if st.button('🔊 음성 테스트', key='pick_tts_test', use_container_width=True):
+            st.session_state['pick_tts_test_pending'] = True
+
+    # 음성 테스트 실행 (설정 바꾼 직후 들어보기 용)
+    if st.session_state.get('pick_tts_test_pending'):
+        from streamlit.components.v1 import html as _tts_test_html
+        _gender_label = '남자입니다' if st.session_state.get('pick_tts_gender') == 'male' else '여자입니다'
+        _tts_test_html(
+            f"<script>{_tts_ko_script(f'안녕하세요. {_gender_label}. 재고완료. 다시 찍어주세요')}</script>",
+            height=0,
+        )
+        st.session_state['pick_tts_test_pending'] = False
 
     # ── 데이터 소스 선택 ──
     pick_mode = st.radio(
@@ -5672,13 +5687,10 @@ with tab8:
 
         # ── 바코드 스캔 (fragment으로 감싸서 전체 앱 리런 없이 조각만 재실행) ──
         def _scan_rerun():
-            """Fragment 내부면 조각 리런, 아니면 전체 리런 (구버전 Streamlit fallback)."""
-            try:
-                st.rerun(scope='fragment')
-            except TypeError:
-                st.rerun()
-            except Exception:
-                st.rerun()
+            """입고분류는 fragment 바깥 테이블들(박스 상품 리스트, 박스별 진행 현황 등)도
+            스캔 직후 갱신되어야 하므로 전체 rerun 사용. 포커스는 자동 포커스 JS가 잡음.
+            """
+            st.rerun()
 
         _use_fragment = getattr(st, 'fragment', lambda f: f)
 
