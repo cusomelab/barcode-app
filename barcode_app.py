@@ -1282,14 +1282,16 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
 def _tts_ko_script(message, pitch=1.0, extra_rate=0.0):
     """한국어 TTS JS 코드 생성.
     - 세션의 pick_tts_gender(female/male), pick_tts_rate 사용
-    - 선호 성별의 한국어 voice 우선 검색, 없으면 아무 한국어 voice
-    - 발음 명확화: pitch/rate 조절 가능
+    - 선호 성별의 한국어 voice 우선 검색
+    - 남자 음성 없는 환경(Chrome 등): 여자 voice + 낮은 pitch(0.7) 로 남자스러운 톤 흉내
     반환: <script> 태그 내부에 바로 넣을 JS 코드
     """
     gender = st.session_state.get('pick_tts_gender', 'female')
     base_rate = float(st.session_state.get('pick_tts_rate', 1.0))
     final_rate = max(0.5, min(2.0, base_rate + extra_rate))
-    # 메시지 escape
+    # 남자 모드일 때 기본 pitch를 낮춰서 남자 음성 흉내 (실제 남자 voice 못 찾을 때도 효과)
+    if gender == 'male' and pitch == 1.0:
+        pitch = 0.7
     msg_esc = str(message).replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ')
     return (
         "try{window.speechSynthesis.cancel();setTimeout(function(){"
@@ -1299,18 +1301,18 @@ def _tts_ko_script(message, pitch=1.0, extra_rate=0.0):
         "u.pitch=" + f"{pitch:.2f}" + ";"
         "u.volume=1.0;"
         "var g='" + gender + "';"
-        "var fH=['Heami','Yuna','Sun-Hi','hyunjung','Ji-Min','Seo-Hyeon','female','Google'];"
-        "var mH=['InJoon','Minsu','Jungmin','male'];"
+        "var fH=['heami','yuna','sun-hi','sunhi','hyunjung','ji-min','jimin','seo-hyeon','seohyeon','female','woman'];"
+        "var mH=['injoon','in-joon','minsu','min-su','jungmin','jung-min','male','man'];"
         "var H=g==='male'?mH:fH;"
         "var V=window.speechSynthesis.getVoices();"
         "var k=null;"
-        "for(var i=0;i<H.length;i++){"
+        # 1차: 한국어 + 성별 힌트 일치 / 2차: 아무 한국어 voice (pitch로 보정)
+        "for(var i=0;i<H.length&&!k;i++){"
         "for(var j=0;j<V.length;j++){"
         "var v=V[j];"
         "if((v.lang||'').toLowerCase().indexOf('ko')===0&&"
-        "(v.name||'').toLowerCase().indexOf(H[i].toLowerCase())>=0){k=v;break;}"
+        "(v.name||'').toLowerCase().indexOf(H[i])>=0){k=v;break;}"
         "}"
-        "if(k)break;"
         "}"
         "if(!k){k=V.find(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});}"
         "if(k)u.voice=k;"
@@ -6094,100 +6096,98 @@ with tab8:
                 {_tts_js_s}
                 </script>""", height=0)
 
-        _scan_fragment()
-
-        # ── 박스별 진행 현황 ──
-        st.markdown('---')
-        st.subheader('📋 박스별 진행 현황')
-        box_summary = {}
-        for bc, v in sort_state.items():
-            for it in v['items']:
-                key = it['box_key']
-                ent = box_summary.setdefault(key, {
-                    'box_num': it['box_num'], 'sym': it['sym'],
-                    'needed': 0, 'scanned': 0, 'sku_total': 0, 'sku_done': 0,
-                    'ships': set(),
-                })
-                ent['needed'] += it['needed']
-                ent['scanned'] += it['scanned']
-                ent['sku_total'] += 1
-                if it.get('ship'):
-                    ent['ships'].add(it['ship'])
-                if it['scanned'] >= it['needed']:
-                    ent['sku_done'] += 1
-
-        # 정렬: 미완료(대기/진행) 먼저 → 완료 맨 아래 / 박스 번호 순
-        def _box_prog_sort_key(kv):
-            key, ent = kv
-            done = (ent['needed'] > 0 and ent['scanned'] >= ent['needed'])
-            return (1 if done else 0, ent['sym'], _box_sort_key(ent['box_num']))
-
-        st.caption('💡 각 박스 헤더를 클릭하면 그 박스에 들어가는 모든 상품이 펼쳐집니다')
-        for key, ent in sorted(box_summary.items(), key=_box_prog_sort_key):
-            pct = (ent['scanned'] / ent['needed'] * 100) if ent['needed'] else 0
-            is_done = (ent['needed'] > 0 and ent['scanned'] >= ent['needed'])
-            if is_done:
-                status = '✅ 완료'
-            elif ent['scanned'] > 0:
-                status = f'🔄 {pct:.0f}%'
-            else:
-                status = '⬜ 대기'
-            _bn_key_p = str(ent['box_num']).strip().upper()
-            _size_label, _size_emoji = box_size_lookup.get(_bn_key_p, ('', ''))
-            _size_str = f'{_size_emoji}{_size_label}' if _size_label else ''
-            exp_title = (
-                f"{status} · **{ent['box_num']}번 박스** {_size_str} · "
-                f"{ent['scanned']}/{ent['needed']}개 · "
-                f"SKU {ent['sku_done']}/{ent['sku_total']} · "
-                f"송장 {len(ent['ships'])}개"
-            )
-            # 미완료 박스는 기본 펼침
-            with st.expander(exp_title, expanded=(not is_done and ent['scanned'] > 0)):
-                detail_rows = []
-                for _bc_d, _v_d in sort_state.items():
-                    for _it_d in _v_d['items']:
-                        if _it_d['box_key'] != key:
-                            continue
-                        _d_s = _it_d['scanned']
-                        _d_n = _it_d['needed']
-                        _d_status = '✅' if _d_s >= _d_n and _d_n > 0 else ('🔄' if _d_s > 0 else '⬜')
-                        detail_rows.append({
-                            '상태': _d_status,
-                            '바코드': _bc_d,
-                            '상품명': _v_d['상품명'],
-                            '배대지박스': _it_d.get('dapae_box', '') or '-',
-                            '송장': _it_d.get('ship', ''),
-                            '필요': _d_n,
-                            '스캔': _d_s,
-                            '남음': max(0, _d_n - _d_s),
-                        })
-                detail_rows.sort(key=lambda r: (
-                    _box_sort_key(r['배대지박스']) if r['배대지박스'] != '-' else ('ZZZ', 99999),
-                    r['송장'], r['바코드'],
-                ))
-                if detail_rows:
-                    st.dataframe(
-                        _pd2.DataFrame(detail_rows),
-                        use_container_width=True, hide_index=True,
-                        height=min(500, len(detail_rows) * 38 + 40),
-                    )
-                else:
-                    st.caption('이 박스에 해당하는 항목이 없습니다')
-
-        # 미스캔 항목
-        incomplete = []
-        for bc, v in sort_state.items():
-            for it in v['items']:
-                if it['scanned'] < it['needed']:
-                    incomplete.append({
-                        '박스': f"{it['box_num']}번",
-                        '바코드': bc,
-                        '상품명': v['상품명'][:35],
-                        '필요': it['needed'],
-                        '스캔': it['scanned'],
-                        '남음': it['needed'] - it['scanned'],
+            # ── 박스별 진행 현황 (fragment 안: 매 스캔마다 갱신됨) ──
+            st.markdown('---')
+            st.subheader('📋 박스별 진행 현황')
+            box_summary = {}
+            for bc, v in sort_state.items():
+                for it in v['items']:
+                    key = it['box_key']
+                    ent = box_summary.setdefault(key, {
+                        'box_num': it['box_num'], 'sym': it['sym'],
+                        'needed': 0, 'scanned': 0, 'sku_total': 0, 'sku_done': 0,
+                        'ships': set(),
                     })
-        if incomplete:
-            with st.expander(f'⏳ 미스캔 ({len(incomplete)}건)', expanded=False):
-                st.dataframe(_pd2.DataFrame(incomplete), use_container_width=True, hide_index=True)
+                    ent['needed'] += it['needed']
+                    ent['scanned'] += it['scanned']
+                    ent['sku_total'] += 1
+                    if it.get('ship'):
+                        ent['ships'].add(it['ship'])
+                    if it['scanned'] >= it['needed']:
+                        ent['sku_done'] += 1
+
+            def _box_prog_sort_key(kv):
+                key, ent = kv
+                done = (ent['needed'] > 0 and ent['scanned'] >= ent['needed'])
+                return (1 if done else 0, ent['sym'], _box_sort_key(ent['box_num']))
+
+            st.caption('💡 각 박스 헤더를 클릭하면 그 박스에 들어가는 모든 상품이 펼쳐집니다')
+            for key, ent in sorted(box_summary.items(), key=_box_prog_sort_key):
+                pct = (ent['scanned'] / ent['needed'] * 100) if ent['needed'] else 0
+                is_done = (ent['needed'] > 0 and ent['scanned'] >= ent['needed'])
+                if is_done:
+                    status = '✅ 완료'
+                elif ent['scanned'] > 0:
+                    status = f'🔄 {pct:.0f}%'
+                else:
+                    status = '⬜ 대기'
+                _bn_key_p = str(ent['box_num']).strip().upper()
+                _size_label, _size_emoji = box_size_lookup.get(_bn_key_p, ('', ''))
+                _size_str = f'{_size_emoji}{_size_label}' if _size_label else ''
+                exp_title = (
+                    f"{status} · **{ent['box_num']}번 박스** {_size_str} · "
+                    f"{ent['scanned']}/{ent['needed']}개 · "
+                    f"SKU {ent['sku_done']}/{ent['sku_total']} · "
+                    f"송장 {len(ent['ships'])}개"
+                )
+                with st.expander(exp_title, expanded=(not is_done and ent['scanned'] > 0)):
+                    detail_rows = []
+                    for _bc_d, _v_d in sort_state.items():
+                        for _it_d in _v_d['items']:
+                            if _it_d['box_key'] != key:
+                                continue
+                            _d_s = _it_d['scanned']
+                            _d_n = _it_d['needed']
+                            _d_status = '✅' if _d_s >= _d_n and _d_n > 0 else ('🔄' if _d_s > 0 else '⬜')
+                            detail_rows.append({
+                                '상태': _d_status,
+                                '바코드': _bc_d,
+                                '상품명': _v_d['상품명'],
+                                '배대지박스': _it_d.get('dapae_box', '') or '-',
+                                '송장': _it_d.get('ship', ''),
+                                '필요': _d_n,
+                                '스캔': _d_s,
+                                '남음': max(0, _d_n - _d_s),
+                            })
+                    detail_rows.sort(key=lambda r: (
+                        _box_sort_key(r['배대지박스']) if r['배대지박스'] != '-' else ('ZZZ', 99999),
+                        r['송장'], r['바코드'],
+                    ))
+                    if detail_rows:
+                        st.dataframe(
+                            _pd2.DataFrame(detail_rows),
+                            use_container_width=True, hide_index=True,
+                            height=min(500, len(detail_rows) * 38 + 40),
+                        )
+                    else:
+                        st.caption('이 박스에 해당하는 항목이 없습니다')
+
+            # 미스캔 항목
+            incomplete = []
+            for bc, v in sort_state.items():
+                for it in v['items']:
+                    if it['scanned'] < it['needed']:
+                        incomplete.append({
+                            '박스': f"{it['box_num']}번",
+                            '바코드': bc,
+                            '상품명': v['상품명'][:35],
+                            '필요': it['needed'],
+                            '스캔': it['scanned'],
+                            '남음': it['needed'] - it['scanned'],
+                        })
+            if incomplete:
+                with st.expander(f'⏳ 미스캔 ({len(incomplete)}건)', expanded=False):
+                    st.dataframe(_pd2.DataFrame(incomplete), use_container_width=True, hide_index=True)
+
+        _scan_fragment()
 
