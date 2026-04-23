@@ -1011,13 +1011,15 @@ def pick_append_log(client, sheet_url, log_entry):
 
 def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=1, box_number=None):
     """배대지 시트 스캔 수량 기록.
-    매칭: A열(박스번호, 0) + E열(바코드, 4) 둘 다 같은 행.
+    매칭: E열(바코드, 4) 일치하는 행 중 A열(박스번호, 0) 일치 우선, 없으면 바코드만 매칭.
     기록:
       - U열(스캔수량, 20): 기존값에 decrement 만큼 누적
       - V열(남은수량, 21): G열 수량 - U열 스캔수량 (안 온 상품 체크용)
     G열(수량)은 건드리지 않음 — 원본 주문 수량으로 보존.
-    box_number 없으면 레거시 동작(바코드만 매칭) 유지.
+
+    박스번호 정규화: 영문숫자만 추출해서 비교 (예: "●M6(17)" → "M6").
     """
+    import re as _re_box
     try:
         sheet_id = _extract_sheet_id(sheet_url)
         spreadsheet = client.open_by_key(sheet_id)
@@ -1031,36 +1033,53 @@ def pick_update_sheet_inventory(client, sheet_url, tab_name, barcode, decrement=
         _SCAN_COL = 20 # U열 (누적 스캔)
         _REM_COL = 21  # V열 (남은 수량)
 
-        _norm_box = str(box_number or '').strip().upper()
+        def _norm(s):
+            """박스번호 정규화 — 영문+숫자만 추출 대문자화 ('●M6(17)' → 'M6')"""
+            return _re_box.sub(r'[^A-Z0-9]', '', str(s or '').upper())
+
+        target_box = _norm(box_number)
+        barcode = str(barcode or '').strip()
+        if not barcode:
+            return False
+
+        # 1차: 바코드 + 박스번호 정확 매칭
+        # 2차: 바코드만 매칭 (박스 불일치일 때 fallback)
+        primary_row = -1
+        fallback_row = -1
         for row_idx in range(1, len(all_values)):
             row = all_values[row_idx]
             if len(row) <= _BC_COL:
                 continue
-            row_bc = str(row[_BC_COL]).strip()
-            if row_bc != barcode:
+            if str(row[_BC_COL]).strip() != barcode:
                 continue
-            if _norm_box:
-                row_box = str(row[_BOX_COL]).strip().upper() if len(row) > _BOX_COL else ''
-                if row_box != _norm_box:
-                    continue
-            # G열 수량 (원본)
-            qty_raw = row[_QTY_COL] if len(row) > _QTY_COL else ''
-            try:
-                qty_orig = int(float(str(qty_raw).strip() or '0'))
-            except (ValueError, TypeError):
-                qty_orig = 0
-            # U열 기존 스캔 수량
-            prev_raw = row[_SCAN_COL] if len(row) > _SCAN_COL else ''
-            try:
-                prev_scan = int(float(str(prev_raw).strip() or '0'))
-            except (ValueError, TypeError):
-                prev_scan = 0
-            new_scan = max(0, prev_scan + int(decrement))
-            remaining = qty_orig - new_scan  # 안 온 상품 = 음수 가능(초과스캔 표식)
-            ws.update_cell(row_idx + 1, _SCAN_COL + 1, new_scan)
-            ws.update_cell(row_idx + 1, _REM_COL + 1, remaining)
-            return True
-        return False
+            row_box = _norm(row[_BOX_COL]) if len(row) > _BOX_COL else ''
+            if target_box and row_box == target_box:
+                primary_row = row_idx
+                break
+            if fallback_row < 0:
+                fallback_row = row_idx
+        hit_row = primary_row if primary_row >= 0 else fallback_row
+        if hit_row < 0:
+            return False
+
+        row = all_values[hit_row]
+        # G열 수량 (원본)
+        qty_raw = row[_QTY_COL] if len(row) > _QTY_COL else ''
+        try:
+            qty_orig = int(float(str(qty_raw).strip() or '0'))
+        except (ValueError, TypeError):
+            qty_orig = 0
+        # U열 기존 스캔 수량
+        prev_raw = row[_SCAN_COL] if len(row) > _SCAN_COL else ''
+        try:
+            prev_scan = int(float(str(prev_raw).strip() or '0'))
+        except (ValueError, TypeError):
+            prev_scan = 0
+        new_scan = max(0, prev_scan + int(decrement))
+        remaining = qty_orig - new_scan
+        ws.update_cell(hit_row + 1, _SCAN_COL + 1, new_scan)
+        ws.update_cell(hit_row + 1, _REM_COL + 1, remaining)
+        return True
     except Exception:
         return False
 
@@ -1258,6 +1277,46 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
         name = str(row[_NAME_COL]).strip() if len(row) > _NAME_COL else ''
         return {'ok': True, 'name': name, 'new_stock': new_stock, 'error': ''}
     return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'미등록 바코드: {barcode}'}
+
+
+def _tts_ko_script(message, pitch=1.0, extra_rate=0.0):
+    """한국어 TTS JS 코드 생성.
+    - 세션의 pick_tts_gender(female/male), pick_tts_rate 사용
+    - 선호 성별의 한국어 voice 우선 검색, 없으면 아무 한국어 voice
+    - 발음 명확화: pitch/rate 조절 가능
+    반환: <script> 태그 내부에 바로 넣을 JS 코드
+    """
+    gender = st.session_state.get('pick_tts_gender', 'female')
+    base_rate = float(st.session_state.get('pick_tts_rate', 1.0))
+    final_rate = max(0.5, min(2.0, base_rate + extra_rate))
+    # 메시지 escape
+    msg_esc = str(message).replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ')
+    return (
+        "try{window.speechSynthesis.cancel();setTimeout(function(){"
+        "var u=new SpeechSynthesisUtterance('" + msg_esc + "');"
+        "u.lang='ko-KR';"
+        "u.rate=" + f"{final_rate:.2f}" + ";"
+        "u.pitch=" + f"{pitch:.2f}" + ";"
+        "u.volume=1.0;"
+        "var g='" + gender + "';"
+        "var fH=['Heami','Yuna','Sun-Hi','hyunjung','Ji-Min','Seo-Hyeon','female','Google'];"
+        "var mH=['InJoon','Minsu','Jungmin','male'];"
+        "var H=g==='male'?mH:fH;"
+        "var V=window.speechSynthesis.getVoices();"
+        "var k=null;"
+        "for(var i=0;i<H.length;i++){"
+        "for(var j=0;j<V.length;j++){"
+        "var v=V[j];"
+        "if((v.lang||'').toLowerCase().indexOf('ko')===0&&"
+        "(v.name||'').toLowerCase().indexOf(H[i].toLowerCase())>=0){k=v;break;}"
+        "}"
+        "if(k)break;"
+        "}"
+        "if(!k){k=V.find(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});}"
+        "if(k)u.voice=k;"
+        "window.speechSynthesis.speak(u);"
+        "},120);}catch(e){}"
+    )
 
 
 def pick_parse_box(box_str):
@@ -3969,6 +4028,24 @@ with tab8:
     st.header('📦 피킹 & 분류')
     st.caption('하나의 시트로 피킹검증 또는 입고분류를 모드 전환하며 사용')
 
+    # ── 음성(TTS) 설정 ──
+    _tts_col1, _tts_col2 = st.columns([1, 1])
+    with _tts_col1:
+        _tts_gender = st.radio(
+            "🔊 음성",
+            ["👩 여자", "👨 남자"],
+            index=0, key="pick_tts_gender_ui", horizontal=True,
+            help="두 노트북에서 동시에 찍을 때 서로 다르게 설정하면 헷갈림 방지",
+        )
+        st.session_state['pick_tts_gender'] = 'male' if '남자' in _tts_gender else 'female'
+    with _tts_col2:
+        _tts_rate = st.slider(
+            '🗣️ 속도 (느릴수록 또렷함)',
+            min_value=0.8, max_value=1.5, value=1.0, step=0.05,
+            key='pick_tts_rate',
+            help="발음이 잘 안 들리면 1.0 이하로 낮추세요",
+        )
+
     # ── 데이터 소스 선택 ──
     pick_mode = st.radio(
         "데이터 소스",
@@ -4514,21 +4591,10 @@ with tab8:
             # 신규 진입 시 "확인을 시작하세요" 음성 안내 (1회)
             if st.session_state.get('pick_start_audio_pending'):
                 from streamlit.components.v1 import html as _st_start_html
-                _st_start_html("""<script>
-                try{
-                    window.speechSynthesis.cancel();
-                    setTimeout(function(){
-                        var u = new SpeechSynthesisUtterance('확인을 시작하세요');
-                        u.lang = 'ko-KR';
-                        u.rate = 1.15;
-                        u.volume = 1.0;
-                        var voices = window.speechSynthesis.getVoices();
-                        var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                        if (koVoice) u.voice = koVoice;
-                        window.speechSynthesis.speak(u);
-                    }, 120);
-                }catch(e){}
-                </script>""", height=0)
+                _st_start_html(
+                    f"<script>{_tts_ko_script('확인을 시작하세요')}</script>",
+                    height=0,
+                )
                 st.session_state.pick_start_audio_pending = False
 
             hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
@@ -4634,21 +4700,10 @@ with tab8:
                     st.session_state.pick_completed_shipments.add(_sid)
                     if _newly_done:
                         from streamlit.components.v1 import html as _st_html_done
-                        _st_html_done("""<script>
-                        try{
-                            window.speechSynthesis.cancel();
-                            setTimeout(function(){
-                                var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
-                                u.lang = 'ko-KR';
-                                u.rate = 1.15;
-                                u.volume = 1.0;
-                                var voices = window.speechSynthesis.getVoices();
-                                var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                                if (koVoice) u.voice = koVoice;
-                                window.speechSynthesis.speak(u);
-                            }, 120);
-                        }catch(e){}
-                        </script>""", height=0)
+                        _st_html_done(
+                            f"<script>{_tts_ko_script('검증확인이 완료되었습니다. 출고하세요', extra_rate=-0.05)}</script>",
+                            height=0,
+                        )
 
                 st.markdown("---")
 
@@ -4708,11 +4763,22 @@ with tab8:
 
                 # 바코드 입력창에 자동 포커스 유지
                 from streamlit.components.v1 import html as _st_html
+                _qty_mode_flag = 'true' if st.session_state.pick_qty_input_mode else 'false'
                 _st_html("""<script>
                 (function(){
                     const doc = window.parent.document;
+                    const qtyMode = __QTY_MODE__;
                     function findScanInput() {
                         const inputs = doc.querySelectorAll('input[type="text"]');
+                        // 다량 모드면 수량 입력 창에 포커스
+                        if (qtyMode) {
+                            for (const inp of inputs) {
+                                if (inp.placeholder && inp.placeholder.includes('숫자 입력')) {
+                                    return inp;
+                                }
+                            }
+                        }
+                        // 기본: 바코드 스캐너 입력창
                         for (const inp of inputs) {
                             if (inp.placeholder && inp.placeholder.includes('스캐너')) {
                                 return inp;
@@ -4761,7 +4827,7 @@ with tab8:
                         setTimeout(function(){ focusScan(e); }, 50);
                     }, true);
                 })();
-                </script>""", height=0)
+                </script>""".replace('__QTY_MODE__', _qty_mode_flag), height=0)
 
                 r = st.session_state.pick_last_scan_result
                 if r:
@@ -4809,28 +4875,15 @@ with tab8:
                     else:
                         speak_text = "확인"
 
-                    # JS 문자열 안전 이스케이프
-                    speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
                     # 매 스캔마다 새 컴포넌트로 강제 재실행 (같은 박스도 소리 나도록)
                     scan_id = st.session_state.pick_scan_counter
+                    _tts_js_block = _tts_ko_script(speak_text)
 
                     from streamlit.components.v1 import html as st_html
                     st_html(f"""<script>
                     // scan_id={scan_id} (강제 재실행용)
                     try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
-                    try{{
-                        window.speechSynthesis.cancel();
-                        setTimeout(function(){{
-                            var u = new SpeechSynthesisUtterance('{speak_text_js}');
-                            u.lang = 'ko-KR';
-                            u.rate = 1.3;
-                            u.volume = 1.0;
-                            var voices = window.speechSynthesis.getVoices();
-                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                            if (koVoice) u.voice = koVoice;
-                            window.speechSynthesis.speak(u);
-                        }}, 100);
-                    }}catch(e){{}}
+                    {_tts_js_block}
                     </script>""", height=0)
 
                 # ── 피킹 현황 (매 스캔마다 갱신되도록 fragment 안에서 렌더링) ──
@@ -5977,7 +6030,6 @@ with tab8:
                             speak = f'{kor_n}번'
 
                 # 소리 + 음성
-                speak_js = speak.replace("'", "\\'").replace('"', '\\"')
                 scan_id_s = st.session_state.sort_scan_counter
                 beep_js = "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);"
                 if r['status'] in ('error', 'wrong_box'):
@@ -5991,19 +6043,11 @@ with tab8:
                                "setTimeout(()=>{o.frequency.value=784},240);"
                                "setTimeout(()=>g.gain.value=0,400);"
                                "setTimeout(()=>o.stop(),500);")
+                _tts_js_s = _tts_ko_script(speak)
                 _sort_html(f"""<script>
                 // sort_id={scan_id_s}
                 try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
-                try{{
-                    window.speechSynthesis.cancel();
-                    setTimeout(function(){{
-                        var u = new SpeechSynthesisUtterance('{speak_js}');
-                        u.lang='ko-KR'; u.rate=1.3; u.volume=1.0;
-                        var v = window.speechSynthesis.getVoices().find(x => x.lang && x.lang.startsWith('ko'));
-                        if(v) u.voice=v;
-                        window.speechSynthesis.speak(u);
-                    }}, 100);
-                }}catch(e){{}}
+                {_tts_js_s}
                 </script>""", height=0)
 
         _scan_fragment()
