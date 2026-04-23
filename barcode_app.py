@@ -1279,6 +1279,46 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
     return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'미등록 바코드: {barcode}'}
 
 
+def _tts_ko_script(message, pitch=1.0, extra_rate=0.0):
+    """한국어 TTS JS 코드 생성.
+    - 세션의 pick_tts_gender(female/male), pick_tts_rate 사용
+    - 선호 성별의 한국어 voice 우선 검색, 없으면 아무 한국어 voice
+    - 발음 명확화: pitch/rate 조절 가능
+    반환: <script> 태그 내부에 바로 넣을 JS 코드
+    """
+    gender = st.session_state.get('pick_tts_gender', 'female')
+    base_rate = float(st.session_state.get('pick_tts_rate', 1.0))
+    final_rate = max(0.5, min(2.0, base_rate + extra_rate))
+    # 메시지 escape
+    msg_esc = str(message).replace('\\', '\\\\').replace("'", "\\'").replace('\n', ' ')
+    return (
+        "try{window.speechSynthesis.cancel();setTimeout(function(){"
+        "var u=new SpeechSynthesisUtterance('" + msg_esc + "');"
+        "u.lang='ko-KR';"
+        "u.rate=" + f"{final_rate:.2f}" + ";"
+        "u.pitch=" + f"{pitch:.2f}" + ";"
+        "u.volume=1.0;"
+        "var g='" + gender + "';"
+        "var fH=['Heami','Yuna','Sun-Hi','hyunjung','Ji-Min','Seo-Hyeon','female','Google'];"
+        "var mH=['InJoon','Minsu','Jungmin','male'];"
+        "var H=g==='male'?mH:fH;"
+        "var V=window.speechSynthesis.getVoices();"
+        "var k=null;"
+        "for(var i=0;i<H.length;i++){"
+        "for(var j=0;j<V.length;j++){"
+        "var v=V[j];"
+        "if((v.lang||'').toLowerCase().indexOf('ko')===0&&"
+        "(v.name||'').toLowerCase().indexOf(H[i].toLowerCase())>=0){k=v;break;}"
+        "}"
+        "if(k)break;"
+        "}"
+        "if(!k){k=V.find(function(v){return (v.lang||'').toLowerCase().indexOf('ko')===0;});}"
+        "if(k)u.voice=k;"
+        "window.speechSynthesis.speak(u);"
+        "},120);}catch(e){}"
+    )
+
+
 def pick_parse_box(box_str):
     import pandas as _pd
     if _pd.isna(box_str) or str(box_str).strip() == "":
@@ -3988,6 +4028,24 @@ with tab8:
     st.header('📦 피킹 & 분류')
     st.caption('하나의 시트로 피킹검증 또는 입고분류를 모드 전환하며 사용')
 
+    # ── 음성(TTS) 설정 ──
+    _tts_col1, _tts_col2 = st.columns([1, 1])
+    with _tts_col1:
+        _tts_gender = st.radio(
+            "🔊 음성",
+            ["👩 여자", "👨 남자"],
+            index=0, key="pick_tts_gender_ui", horizontal=True,
+            help="두 노트북에서 동시에 찍을 때 서로 다르게 설정하면 헷갈림 방지",
+        )
+        st.session_state['pick_tts_gender'] = 'male' if '남자' in _tts_gender else 'female'
+    with _tts_col2:
+        _tts_rate = st.slider(
+            '🗣️ 속도 (느릴수록 또렷함)',
+            min_value=0.8, max_value=1.5, value=1.0, step=0.05,
+            key='pick_tts_rate',
+            help="발음이 잘 안 들리면 1.0 이하로 낮추세요",
+        )
+
     # ── 데이터 소스 선택 ──
     pick_mode = st.radio(
         "데이터 소스",
@@ -4533,21 +4591,10 @@ with tab8:
             # 신규 진입 시 "확인을 시작하세요" 음성 안내 (1회)
             if st.session_state.get('pick_start_audio_pending'):
                 from streamlit.components.v1 import html as _st_start_html
-                _st_start_html("""<script>
-                try{
-                    window.speechSynthesis.cancel();
-                    setTimeout(function(){
-                        var u = new SpeechSynthesisUtterance('확인을 시작하세요');
-                        u.lang = 'ko-KR';
-                        u.rate = 1.15;
-                        u.volume = 1.0;
-                        var voices = window.speechSynthesis.getVoices();
-                        var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                        if (koVoice) u.voice = koVoice;
-                        window.speechSynthesis.speak(u);
-                    }, 120);
-                }catch(e){}
-                </script>""", height=0)
+                _st_start_html(
+                    f"<script>{_tts_ko_script('확인을 시작하세요')}</script>",
+                    height=0,
+                )
                 st.session_state.pick_start_audio_pending = False
 
             hcol1, hcol2, hcol3 = st.columns([3, 1, 1])
@@ -4653,21 +4700,10 @@ with tab8:
                     st.session_state.pick_completed_shipments.add(_sid)
                     if _newly_done:
                         from streamlit.components.v1 import html as _st_html_done
-                        _st_html_done("""<script>
-                        try{
-                            window.speechSynthesis.cancel();
-                            setTimeout(function(){
-                                var u = new SpeechSynthesisUtterance('검증확인이 완료되었습니다. 출고하세요');
-                                u.lang = 'ko-KR';
-                                u.rate = 1.15;
-                                u.volume = 1.0;
-                                var voices = window.speechSynthesis.getVoices();
-                                var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                                if (koVoice) u.voice = koVoice;
-                                window.speechSynthesis.speak(u);
-                            }, 120);
-                        }catch(e){}
-                        </script>""", height=0)
+                        _st_html_done(
+                            f"<script>{_tts_ko_script('검증확인이 완료되었습니다. 출고하세요', extra_rate=-0.05)}</script>",
+                            height=0,
+                        )
 
                 st.markdown("---")
 
@@ -4839,28 +4875,15 @@ with tab8:
                     else:
                         speak_text = "확인"
 
-                    # JS 문자열 안전 이스케이프
-                    speak_text_js = speak_text.replace("'", "\\'").replace('"', '\\"')
                     # 매 스캔마다 새 컴포넌트로 강제 재실행 (같은 박스도 소리 나도록)
                     scan_id = st.session_state.pick_scan_counter
+                    _tts_js_block = _tts_ko_script(speak_text)
 
                     from streamlit.components.v1 import html as st_html
                     st_html(f"""<script>
                     // scan_id={scan_id} (강제 재실행용)
                     try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{js_code}}}catch(e){{}}
-                    try{{
-                        window.speechSynthesis.cancel();
-                        setTimeout(function(){{
-                            var u = new SpeechSynthesisUtterance('{speak_text_js}');
-                            u.lang = 'ko-KR';
-                            u.rate = 1.3;
-                            u.volume = 1.0;
-                            var voices = window.speechSynthesis.getVoices();
-                            var koVoice = voices.find(v => v.lang && v.lang.startsWith('ko'));
-                            if (koVoice) u.voice = koVoice;
-                            window.speechSynthesis.speak(u);
-                        }}, 100);
-                    }}catch(e){{}}
+                    {_tts_js_block}
                     </script>""", height=0)
 
                 # ── 피킹 현황 (매 스캔마다 갱신되도록 fragment 안에서 렌더링) ──
@@ -6007,7 +6030,6 @@ with tab8:
                             speak = f'{kor_n}번'
 
                 # 소리 + 음성
-                speak_js = speak.replace("'", "\\'").replace('"', '\\"')
                 scan_id_s = st.session_state.sort_scan_counter
                 beep_js = "o.frequency.value=880;g.gain.value=0.3;o.start();setTimeout(()=>g.gain.value=0,150);setTimeout(()=>o.stop(),200);"
                 if r['status'] in ('error', 'wrong_box'):
@@ -6021,19 +6043,11 @@ with tab8:
                                "setTimeout(()=>{o.frequency.value=784},240);"
                                "setTimeout(()=>g.gain.value=0,400);"
                                "setTimeout(()=>o.stop(),500);")
+                _tts_js_s = _tts_ko_script(speak)
                 _sort_html(f"""<script>
                 // sort_id={scan_id_s}
                 try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
-                try{{
-                    window.speechSynthesis.cancel();
-                    setTimeout(function(){{
-                        var u = new SpeechSynthesisUtterance('{speak_js}');
-                        u.lang='ko-KR'; u.rate=1.3; u.volume=1.0;
-                        var v = window.speechSynthesis.getVoices().find(x => x.lang && x.lang.startsWith('ko'));
-                        if(v) u.voice=v;
-                        window.speechSynthesis.speak(u);
-                    }}, 100);
-                }}catch(e){{}}
+                {_tts_js_s}
                 </script>""", height=0)
 
         _scan_fragment()
