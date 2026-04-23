@@ -5457,7 +5457,7 @@ with tab8:
         if 'sort_active_boxes' not in st.session_state:
             st.session_state.sort_active_boxes = []
 
-        sac1, sac2 = st.columns([4, 1])
+        sac1, sac2, sac3 = st.columns([4, 1, 1])
         with sac1:
             active_boxes = st.multiselect(
                 '🎯 지금 열어놓은 배대지 박스 (바코드 #1, #2... 찍으면 자동 추가)',
@@ -5471,7 +5471,13 @@ with tab8:
             st.session_state.sort_active_boxes = active_boxes
 
         with sac2:
-            if st.button('🔄 초기화', key='sort_reset', use_container_width=True):
+            if st.button('🔄 현황 새로고침', key='sort_refresh_view',
+                         use_container_width=True,
+                         help='아래 테이블(이 박스 상품, 박스별 진행 현황)을 최신 스캔 반영해서 다시 그리기'):
+                st.rerun()
+
+        with sac3:
+            if st.button('🗑️ 초기화', key='sort_reset', use_container_width=True):
                 st.session_state.sort_state = _build_sort_state()
                 st.session_state.sort_scan_counter = 0
                 st.session_state.sort_last_result = None
@@ -5760,10 +5766,15 @@ with tab8:
 
         # ── 바코드 스캔 (fragment으로 감싸서 전체 앱 리런 없이 조각만 재실행) ──
         def _scan_rerun():
-            """입고분류는 fragment 바깥 테이블들(박스 상품 리스트, 박스별 진행 현황 등)도
-            스캔 직후 갱신되어야 하므로 전체 rerun 사용. 포커스는 자동 포커스 JS가 잡음.
+            """빠른 연속 스캔을 위해 fragment 내부만 재렌더.
+            외부 테이블(이 박스 상품 리스트 등)은 버튼으로 수동 새로고침 가능.
             """
-            st.rerun()
+            try:
+                st.rerun(scope='fragment')
+            except TypeError:
+                st.rerun()
+            except Exception:
+                st.rerun()
 
         _use_fragment = getattr(st, 'fragment', lambda f: f)
 
