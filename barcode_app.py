@@ -1181,15 +1181,15 @@ def pick_write_box_numbers(client, sheet_url, tab_name, ship_to_box, only_empty=
 
 def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
     """등록상품정보 시트에서 바코드(D열, index 3) 매칭 후 재고/위치 업데이트.
-    - AB열(index 27): 기존 재고 + qty 누적
-    - AC열(index 28): 위치 추가 (중복이면 스킵, 여러 위치는 ", " 구분)
+    - X열(index 23): 기존 재고 + qty 누적
+    - V열(index 21): 위치 추가 (중복이면 스킵, 여러 위치는 ", " 구분)
     - C열(index 2): 상품명 반환용
     반환: dict {ok: bool, name: str, new_stock: int, error: str, row_idx: int}
     """
     _BC_COL = 3       # D열
     _NAME_COL = 2     # C열
-    _STOCK_COL = 27   # AB열 (28번째)
-    _LOC_COL = 28     # AC열 (29번째)
+    _STOCK_COL = 23   # X열 (24번째)
+    _LOC_COL = 21     # V열 (22번째)
 
     try:
         qty_int = int(qty)
@@ -1230,7 +1230,7 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
         if str(row[_BC_COL]).strip() != str(barcode).strip():
             continue
 
-        # AB열 기존 재고 + qty
+        # X열 기존 재고 + qty
         prev_raw = row[_STOCK_COL] if len(row) > _STOCK_COL else ''
         try:
             prev = int(float(str(prev_raw).strip() or '0'))
@@ -1238,7 +1238,7 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
             prev = 0
         new_stock = prev + qty_int
 
-        # AC열 위치 (중복 방지)
+        # V열 위치 (중복 방지)
         existing_loc = str(row[_LOC_COL]).strip() if len(row) > _LOC_COL else ''
         loc_new = str(location or '').strip()
         updated_loc = existing_loc
@@ -1277,6 +1277,98 @@ def stock_update_barcode(client, sheet_url, tab_name, barcode, qty, location):
         name = str(row[_NAME_COL]).strip() if len(row) > _NAME_COL else ''
         return {'ok': True, 'name': name, 'new_stock': new_stock, 'error': ''}
     return {'ok': False, 'name': '', 'new_stock': 0, 'error': f'미등록 바코드: {barcode}'}
+
+
+def stock_change_location(client, sheet_url, tab_name, old_loc, new_loc, preview_only=False):
+    """등록상품정보 시트 V열(위치)에서 기존 위치를 새 위치로 일괄 교체.
+    - V열 형식: ", " 구분된 여러 위치 (예: "G박스, A-1")
+    - old_loc 토큰만 정확히 매칭해서 new_loc으로 교체 (다른 위치는 보존)
+    - new_loc이 빈 문자열이면 old_loc만 제거
+    - 같은 행에 new_loc이 이미 있으면 중복 추가 안 함
+    - preview_only=True면 시트 안 건드리고 변경 대상만 반환
+
+    반환: {ok, total_changed, changes: [{row, name, barcode, old, new}]}
+    """
+    _BC_COL = 3       # D열
+    _NAME_COL = 2     # C열
+    _LOC_COL = 21     # V열 (22번째)
+
+    old_loc = str(old_loc or '').strip()
+    new_loc = str(new_loc or '').strip()
+    if not old_loc:
+        return {'ok': False, 'total_changed': 0, 'changes': [], 'error': '기존 위치를 입력하세요'}
+
+    try:
+        sheet_id = _extract_sheet_id(sheet_url)
+        spreadsheet = client.open_by_key(sheet_id)
+        ws = spreadsheet.worksheet(tab_name)
+        all_values = ws.get_all_values()
+    except Exception as e:
+        return {'ok': False, 'total_changed': 0, 'changes': [], 'error': f'시트 열기 실패: {e}'}
+    if len(all_values) < 2:
+        return {'ok': False, 'total_changed': 0, 'changes': [], 'error': '시트가 비어있음'}
+
+    changes = []
+    updates = []  # batch_update용
+    for row_idx in range(1, len(all_values)):
+        row = all_values[row_idx]
+        if len(row) <= _LOC_COL:
+            continue
+        existing = str(row[_LOC_COL]).strip()
+        if not existing:
+            continue
+        parts = [s.strip() for s in existing.split(',') if s.strip()]
+        if old_loc not in parts:
+            continue
+        # 토큰 교체
+        if new_loc:
+            new_parts = []
+            replaced = False
+            for p in parts:
+                if p == old_loc:
+                    if new_loc not in new_parts and new_loc not in parts:
+                        new_parts.append(new_loc)
+                    elif new_loc in new_parts:
+                        pass  # 이미 추가됨
+                    # 같은 행에 new_loc이 다른 토큰으로 이미 있으면 → 중복 방지 (생략)
+                    replaced = True
+                else:
+                    if p not in new_parts:
+                        new_parts.append(p)
+            updated = ', '.join(new_parts)
+        else:
+            # new_loc 비었으면 old_loc 제거만
+            updated = ', '.join(p for p in parts if p != old_loc)
+
+        if updated == existing:
+            continue
+
+        bc = str(row[_BC_COL]).strip() if len(row) > _BC_COL else ''
+        nm = str(row[_NAME_COL]).strip() if len(row) > _NAME_COL else ''
+        changes.append({
+            'row': row_idx + 1,
+            'barcode': bc,
+            'name': nm[:40],
+            'old': existing,
+            'new': updated,
+        })
+        if not preview_only:
+            # V열은 인덱스 21 → A1 표기 'V' (22번째 열)
+            updates.append({
+                'range': f'V{row_idx + 1}',
+                'values': [[updated]],
+            })
+
+    if not preview_only and updates:
+        try:
+            ws.batch_update(updates)
+            # 캐시 무효화 (다음 조회 시 신선한 데이터 반영)
+            st.session_state.pop('_stock_sheet_cache', None)
+        except Exception as e:
+            return {'ok': False, 'total_changed': 0, 'changes': changes,
+                    'error': f'시트 쓰기 실패: {e}'}
+
+    return {'ok': True, 'total_changed': len(changes), 'changes': changes, 'error': ''}
 
 
 def _tts_ko_script(message, pitch=None, extra_rate=0.0):
@@ -1825,7 +1917,7 @@ with tab2:
 # ── 재고 확인(반출 재고 채우기) 탭 ──────────────────────────
 with tab_stock:
     st.header('📥 반출 재고 채우기')
-    st.caption('위치를 먼저 지정하고 바코드를 스캔하면 등록상품정보 시트의 AB열(국내재고)에 누적, AC열에 위치 기록')
+    st.caption('위치를 먼저 지정하고 바코드를 스캔하면 등록상품정보 시트의 X열(재고)에 누적, V열에 위치 기록')
 
     _STOCK_SHEET_URL = "https://docs.google.com/spreadsheets/d/1M-r5BfuVRh2dunBsR_6lZZ7f4sH7NSI0B9rbBMuMdTc/edit?gid=0#gid=0"
     _STOCK_SHEET_TAB = "등록상품정보"
@@ -1886,6 +1978,63 @@ with tab_stock:
             if st.button('🔄 위치 변경', use_container_width=True, key='stock_reset_loc'):
                 st.session_state.stock_location = ''
                 st.rerun()
+
+        # ── 위치 일괄 변경 ──
+        with st.expander('🔁 위치 일괄 변경 (예: G박스 → H박스)', expanded=False):
+            st.caption('기존 위치에 있는 모든 상품의 AC열 위치를 새 위치로 일괄 교체합니다. 같은 행에 다른 위치가 같이 있으면 그 위치는 유지됨.')
+            _ch_c1, _ch_c2, _ch_c3 = st.columns([2, 2, 1])
+            with _ch_c1:
+                _old_loc = st.text_input(
+                    '기존 위치',
+                    key='stock_change_old',
+                    placeholder='예: G박스',
+                )
+            with _ch_c2:
+                _new_loc = st.text_input(
+                    '변경할 위치 (비우면 위치 제거)',
+                    key='stock_change_new',
+                    placeholder='예: H박스',
+                )
+            with _ch_c3:
+                st.markdown('<br>', unsafe_allow_html=True)
+                _ch_preview = st.button('🔍 미리보기', use_container_width=True, key='stock_change_preview_btn')
+
+            if _ch_preview:
+                with st.spinner('대상 검색 중...'):
+                    _prv = stock_change_location(
+                        _sclient, _STOCK_SHEET_URL, _STOCK_SHEET_TAB,
+                        _old_loc.strip(), _new_loc.strip(), preview_only=True,
+                    )
+                st.session_state['_stock_change_preview'] = _prv
+
+            _prv = st.session_state.get('_stock_change_preview')
+            if _prv:
+                if not _prv.get('ok'):
+                    st.error(_prv.get('error', '오류'))
+                elif _prv['total_changed'] == 0:
+                    st.warning(f"기존 위치 '{_old_loc.strip()}'에 해당하는 상품이 없습니다")
+                else:
+                    st.success(f'✅ 변경 대상 {_prv["total_changed"]}건 발견')
+                    import pandas as _pds_ch
+                    _ch_rows = [{
+                        '행': c['row'], '바코드': c['barcode'],
+                        '상품명': c['name'], '기존 위치': c['old'], '변경 후': c['new'],
+                    } for c in _prv['changes']]
+                    st.dataframe(_pds_ch.DataFrame(_ch_rows),
+                                 use_container_width=True, hide_index=True)
+                    if st.button(f'✅ 위 {_prv["total_changed"]}건 일괄 변경 실행',
+                                 type='primary', key='stock_change_exec',
+                                 use_container_width=True):
+                        with st.spinner('시트 업데이트 중...'):
+                            _res = stock_change_location(
+                                _sclient, _STOCK_SHEET_URL, _STOCK_SHEET_TAB,
+                                _old_loc.strip(), _new_loc.strip(), preview_only=False,
+                            )
+                        if _res.get('ok'):
+                            st.success(f'✅ {_res["total_changed"]}건 변경 완료')
+                            st.session_state.pop('_stock_change_preview', None)
+                        else:
+                            st.error(f'❌ {_res.get("error", "실패")}')
 
         if not st.session_state.stock_location:
             st.info('👆 먼저 위치를 입력하고 "✅ 위치 설정"을 눌러주세요')
