@@ -4238,27 +4238,38 @@ with tab8:
     st.header('📦 피킹 & 분류')
     st.caption('하나의 시트로 피킹검증 또는 입고분류를 모드 전환하며 사용')
 
-    # ── 음성(TTS) 설정 ──
-    _tts_col1, _tts_col2, _tts_col3 = st.columns([1, 1, 1])
-    with _tts_col1:
-        _tts_gender = st.radio(
-            "🔊 음성",
-            ["👩 여자", "👨 남자"],
-            index=0, key="pick_tts_gender_ui", horizontal=True,
-            help="두 노트북에서 동시에 찍을 때 서로 다르게 설정하면 헷갈림 방지",
-        )
-        st.session_state['pick_tts_gender'] = 'male' if '남자' in _tts_gender else 'female'
-    with _tts_col2:
-        _tts_rate = st.slider(
-            '🗣️ 속도 (느릴수록 또렷함)',
-            min_value=0.8, max_value=1.5, value=1.0, step=0.05,
-            key='pick_tts_rate',
-            help="발음이 잘 안 들리면 1.0 이하로 낮추세요",
-        )
-    with _tts_col3:
-        st.markdown('<br>', unsafe_allow_html=True)
-        if st.button('🔊 음성 테스트', key='pick_tts_test', use_container_width=True):
-            st.session_state['pick_tts_test_pending'] = True
+    # ── 음성(TTS) 설정 (이전 세션 state 호환 안 될 수 있어 try/except로 보호) ──
+    try:
+        # 호환성: 이전 세션의 잘못된 값 방어
+        _gender_options = ["👩 여자", "👨 남자"]
+        if st.session_state.get('pick_tts_gender_ui') not in _gender_options:
+            st.session_state.pop('pick_tts_gender_ui', None)
+        _rate_val = st.session_state.get('pick_tts_rate', 1.0)
+        if not (isinstance(_rate_val, (int, float)) and 0.8 <= float(_rate_val) <= 1.5):
+            st.session_state.pop('pick_tts_rate', None)
+
+        _tts_col1, _tts_col2, _tts_col3 = st.columns([1, 1, 1])
+        with _tts_col1:
+            _tts_gender = st.radio(
+                "🔊 음성",
+                _gender_options,
+                index=0, key="pick_tts_gender_ui", horizontal=True,
+                help="두 노트북에서 동시에 찍을 때 서로 다르게 설정하면 헷갈림 방지",
+            )
+            st.session_state['pick_tts_gender'] = 'male' if '남자' in _tts_gender else 'female'
+        with _tts_col2:
+            _tts_rate = st.slider(
+                '🗣️ 속도 (느릴수록 또렷함)',
+                min_value=0.8, max_value=1.5, value=1.0, step=0.05,
+                key='pick_tts_rate',
+                help="발음이 잘 안 들리면 1.0 이하로 낮추세요",
+            )
+        with _tts_col3:
+            st.markdown('<br>', unsafe_allow_html=True)
+            if st.button('🔊 음성 테스트', key='pick_tts_test', use_container_width=True):
+                st.session_state['pick_tts_test_pending'] = True
+    except Exception as _tts_ui_err:
+        st.warning(f'⚠️ TTS 설정 UI 초기화 중 문제: {_tts_ui_err}. 페이지 새로고침하세요.')
 
     # 음성 이름 직접 선택기 (브라우저 voice 목록 표시)
     with st.expander('⚙️ 음성 고급 설정 — 내 브라우저에 설치된 voice 직접 선택', expanded=False):
@@ -6238,27 +6249,31 @@ with tab8:
             _is_fresh_scan = (r is not None and _current_scan_id != _last_played_id)
 
             # ── 박스 완료 음성 발생 전에 정확성 재검증 (거짓 완료 방지) ──
-            _box_complete_validated = False
-            _miss_items = []
-            if r and _is_fresh_scan and r.get('box_complete'):
-                _bk = r.get('box_key')
-                for _bc_v, _v_v in sort_state.items():
-                    for _it_v in _v_v['items']:
-                        if _it_v.get('box_key') == _bk and _it_v['scanned'] < _it_v['needed']:
-                            _miss_items.append({
-                                '바코드': _bc_v,
-                                '상품명': _v_v['상품명'][:30],
-                                '필요': _it_v['needed'],
-                                '스캔': _it_v['scanned'],
-                                '남음': _it_v['needed'] - _it_v['scanned'],
-                            })
-                _box_complete_validated = (len(_miss_items) == 0)
-                if not _box_complete_validated:
-                    # 완료 검출 거짓이었으므로 결과 강제 수정 → 음성/UI 다른 분기로
-                    r = dict(r)  # 사본
-                    r['box_complete'] = False
-                    r['_box_validation_failed'] = True
-                    r['_miss_items'] = _miss_items
+            try:
+                _box_complete_validated = False
+                _miss_items = []
+                if r and _is_fresh_scan and isinstance(r, dict) and r.get('box_complete'):
+                    _bk = r.get('box_key')
+                    for _bc_v, _v_v in sort_state.items():
+                        for _it_v in _v_v.get('items', []):
+                            if _it_v.get('box_key') == _bk and _it_v.get('scanned', 0) < _it_v.get('needed', 0):
+                                _miss_items.append({
+                                    '바코드': _bc_v,
+                                    '상품명': _v_v.get('상품명', '')[:30],
+                                    '필요': _it_v.get('needed', 0),
+                                    '스캔': _it_v.get('scanned', 0),
+                                    '남음': _it_v.get('needed', 0) - _it_v.get('scanned', 0),
+                                })
+                    _box_complete_validated = (len(_miss_items) == 0)
+                    if not _box_complete_validated:
+                        # 완료 검출 거짓이었으므로 결과 강제 수정 → 음성/UI 다른 분기로
+                        r = dict(r)  # 사본
+                        r['box_complete'] = False
+                        r['_box_validation_failed'] = True
+                        r['_miss_items'] = _miss_items
+            except Exception:
+                # 검증 실패하더라도 음성/UI는 진행 (이전 동작 유지)
+                pass
 
             if r and _is_fresh_scan:
                 _KOR_NUMS_SORT = {
