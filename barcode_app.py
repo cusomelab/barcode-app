@@ -5340,6 +5340,8 @@ with tab8:
             st.session_state.sort_data_ver = id(df_sort)
             st.session_state.sort_scan_counter = 0
             st.session_state.sort_last_result = None
+            # 유령 TTS 방지: 새 데이터 로드 시 played_id를 0으로 동기화
+            st.session_state['_sort_tts_played_id'] = 0
 
         sort_state = st.session_state.sort_state
 
@@ -6230,7 +6232,35 @@ with tab8:
 
             # ── 결과 표시 + 음성 ──
             r = st.session_state.get('sort_last_result')
-            if r:
+            # 같은 결과를 rerun 시 반복 재생/표시하지 않도록 scan_id로 가드
+            _last_played_id = st.session_state.get('_sort_tts_played_id', -1)
+            _current_scan_id = st.session_state.sort_scan_counter
+            _is_fresh_scan = (r is not None and _current_scan_id != _last_played_id)
+
+            # ── 박스 완료 음성 발생 전에 정확성 재검증 (거짓 완료 방지) ──
+            _box_complete_validated = False
+            _miss_items = []
+            if r and _is_fresh_scan and r.get('box_complete'):
+                _bk = r.get('box_key')
+                for _bc_v, _v_v in sort_state.items():
+                    for _it_v in _v_v['items']:
+                        if _it_v.get('box_key') == _bk and _it_v['scanned'] < _it_v['needed']:
+                            _miss_items.append({
+                                '바코드': _bc_v,
+                                '상품명': _v_v['상품명'][:30],
+                                '필요': _it_v['needed'],
+                                '스캔': _it_v['scanned'],
+                                '남음': _it_v['needed'] - _it_v['scanned'],
+                            })
+                _box_complete_validated = (len(_miss_items) == 0)
+                if not _box_complete_validated:
+                    # 완료 검출 거짓이었으므로 결과 강제 수정 → 음성/UI 다른 분기로
+                    r = dict(r)  # 사본
+                    r['box_complete'] = False
+                    r['_box_validation_failed'] = True
+                    r['_miss_items'] = _miss_items
+
+            if r and _is_fresh_scan:
                 _KOR_NUMS_SORT = {
                     1:'일',2:'이',3:'삼',4:'사',5:'오',6:'육',7:'칠',8:'팔',9:'구',10:'십',
                     11:'십일',12:'십이',13:'십삼',14:'십사',15:'십오',16:'십육',17:'십칠',
@@ -6304,7 +6334,20 @@ with tab8:
                     kor_n = _box_to_kor(box_num_str)
                     size_label, size_emoji = box_size_lookup.get(box_num_str, ('', ''))
                     size_str = f' ({size_emoji}{size_label}형)' if size_label else ''
-                    if r.get('box_complete'):
+                    if r.get('_box_validation_failed'):
+                        # 완료 검출됐으나 검증 결과 미스캔 발견 → 경고 모드
+                        _miss_n = len(r.get('_miss_items') or [])
+                        st.markdown(
+                            f'<div class="scan-warning" style="background:#f59e0b;color:white;padding:1.5rem;border-radius:10px;text-align:center;border-left:8px solid #d97706">'
+                            f'<div style="font-size:1.8rem;font-weight:bold;">⚠️ {box_num_str}번 — 완료 같지만 {_miss_n}건 미스캔!</div>'
+                            f'<div style="font-size:1rem;margin-top:0.5rem;">아래 미스캔 항목을 다시 확인해주세요.</div>'
+                            f'</div>',
+                            unsafe_allow_html=True)
+                        speak = f'{kor_n}번 미스캔 있음'
+                        import pandas as _pd_miss2
+                        st.dataframe(_pd_miss2.DataFrame(r['_miss_items']),
+                                     use_container_width=True, hide_index=True)
+                    elif r.get('box_complete'):
                         # 박스 완료! 큰 알림 + 포장 안내
                         st.markdown(
                             f'<div class="scan-complete" style="background:#10b981;color:white;padding:2rem;border-radius:12px;text-align:center;border-left:8px solid #059669">'
@@ -6348,6 +6391,8 @@ with tab8:
                 try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
                 {_tts_js_s}
                 </script>""", height=0)
+                # 이 scan_id에 대해서는 TTS 재생 완료로 마크 → 같은 rerun 반복돼도 다시 안 울림
+                st.session_state['_sort_tts_played_id'] = _current_scan_id
 
             # ── 박스별 진행 현황 (fragment 안: 매 스캔마다 갱신됨) ──
             st.markdown('---')
