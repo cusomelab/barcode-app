@@ -6230,7 +6230,11 @@ with tab8:
 
             # ── 결과 표시 + 음성 ──
             r = st.session_state.get('sort_last_result')
-            if r:
+            # 같은 결과를 rerun 시 반복 재생/표시하지 않도록 scan_id로 가드
+            _last_played_id = st.session_state.get('_sort_tts_played_id', -1)
+            _current_scan_id = st.session_state.sort_scan_counter
+            _is_fresh_scan = (r is not None and _current_scan_id != _last_played_id)
+            if r and _is_fresh_scan:
                 _KOR_NUMS_SORT = {
                     1:'일',2:'이',3:'삼',4:'사',5:'오',6:'육',7:'칠',8:'팔',9:'구',10:'십',
                     11:'십일',12:'십이',13:'십삼',14:'십사',15:'십오',16:'십육',17:'십칠',
@@ -6348,6 +6352,32 @@ with tab8:
                 try{{var a=new(window.AudioContext||window.webkitAudioContext)();var o=a.createOscillator();var g=a.createGain();o.connect(g);g.connect(a.destination);{beep_js}}}catch(e){{}}
                 {_tts_js_s}
                 </script>""", height=0)
+                # 이 scan_id에 대해서는 TTS 재생 완료로 마크 → 같은 rerun 반복돼도 다시 안 울림
+                st.session_state['_sort_tts_played_id'] = _current_scan_id
+
+            # 박스 완료 음성 났을 때 정확성 검증 — 정말 다 스캔됐는지 한 번 더 카운트
+            if r and _is_fresh_scan and r.get('box_complete'):
+                _bk = r.get('box_key')
+                _miss = []
+                for _bc, _v in sort_state.items():
+                    for _it in _v['items']:
+                        if _it.get('box_key') == _bk and _it['scanned'] < _it['needed']:
+                            _miss.append({
+                                '바코드': _bc,
+                                '상품명': _v['상품명'][:30],
+                                '필요': _it['needed'],
+                                '스캔': _it['scanned'],
+                                '남음': _it['needed'] - _it['scanned'],
+                            })
+                if _miss:
+                    # 완료 음성 났는데 실제 미스캔 있음 — 사용자에게 강력 경고
+                    st.error(
+                        f'⚠️ "{r.get("box_num", "")}번 완료" 음성이 났지만 **{len(_miss)}건 미스캔이 발견됨!** '
+                        f'아래 항목 다시 확인하세요. (완료 검출 알고리즘 오류 가능)'
+                    )
+                    import pandas as _pd_miss
+                    st.dataframe(_pd_miss.DataFrame(_miss),
+                                 use_container_width=True, hide_index=True)
 
             # ── 박스별 진행 현황 (fragment 안: 매 스캔마다 갱신됨) ──
             st.markdown('---')
